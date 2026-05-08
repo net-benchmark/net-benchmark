@@ -1,0 +1,10 @@
+include README-pypi.md
+include LICENSE
+include CONTRIBUTING.md
+include RELEASE.md
+recursive-include src/net_benchmark *.py
+recursive-include src/net_benchmark/dns_benchmark/docs/screenshots *.png
+exclude src/net_benchmark/dns_benchmark/sample_data/*
+exclude src/net_benchmark/dns_benchmark/data/*
+exclude src/net_benchmark/tests/*
+exclude src/net_benchmark/dns_benchmark/tests/*
