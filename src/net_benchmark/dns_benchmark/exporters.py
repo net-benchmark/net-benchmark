@@ -583,7 +583,7 @@ class PDFExporter:
     ) -> None:
         if HTML is None:
             raise RuntimeError(
-                "PDF export requires 'weasyprint'. Install with: pip install dns-benchmark-tool[pdf]"
+                "PDF export requires 'weasyprint'. Install with: pip install net-benchmark[pdf]"
             )
 
         charts_dir = tempfile.mkdtemp()
