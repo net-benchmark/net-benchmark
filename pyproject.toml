@@ -24,8 +24,7 @@ keywords = [
 dependencies = [
     "httpx[http2]>=0.28.1,<0.29",
     "dnspython>=2.7,<3.0",       
-    "pandas>=2.0,<3.0",          
-    "aiohttp>=3.8,<4.0",         
+    "pandas>=2.0,<3.0",       
     "click>=8.0,<9.0",           
     "pyfiglet>=1.0,<2.0",        
     "colorama>=0.4,<1.0",        
@@ -35,6 +34,7 @@ dependencies = [
     "tqdm>=4.66,<5.0",           
     "matplotlib>=3.8,<4.0",
     "pillow>=11.0.0,<12.0.0",
+    "cryptography>=42.0,<45.0",
 ]
 
 classifiers = [
@@ -63,6 +63,8 @@ Changelog = "https://github.com/net-benchmark/net-benchmark/blob/main/CHANGELOG.
 
 [project.optional-dependencies]
 pdf = ["weasyprint>=66.0,<67.0"]
+websocket = ["aiohttp>=3.8,<4.0"]
+
 dev = [
     "mypy>=1.8,<2.0",
     "black>=24.0,<26.0",
@@ -86,7 +88,7 @@ net_benchmark = [
 ]
 
 [project.scripts]
-net-benchmark = "net_benchmark.dns_benchmark.cli:cli"
+net-benchmark = "net_benchmark.cli:cli"
 dns-benchmark = "net_benchmark.dns_benchmark.cli:cli"  # backward compat
 
 # -------------------

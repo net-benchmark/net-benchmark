@@ -58,6 +58,11 @@ pip install -e .
 ```bash
 net-benchmark --version
 net-benchmark dns --help
+net-benchmark http --help
+
+# See all available options for a specific command
+net-benchmark dns benchmark --help
+net-benchmark http benchmark --help
 ```
 
 ### First Run
@@ -65,6 +70,9 @@ net-benchmark dns --help
 ```bash
 # Test with defaults (recommended for first time)
 net-benchmark dns benchmark --use-defaults --formats csv,excel
+
+# HTTP test with defaults
+net-benchmark http benchmark --use-defaults --formats csv,excel
 ```
 
 ---
@@ -1238,16 +1246,529 @@ Run multiple iterations (`--iterations 5`) for more consistent results.
 
 ### HTTP benchmark
 
-<details>
-<summary><strong>HTTP benchmark</strong> — benchmark http/https endpoints <em>(coming in 0.5.0)</em></summary>
+<details open>
+<summary><strong>HTTP benchmark</strong> — latency, TTFB, security headers, CDN fingerprinting, TLS certs</summary>
 
-#### Planned features
+#### 🎯 Why This Tool?
 
-- measure TTFB, download speed, redirect chains
-- support for HTTP/2 and HTTP/3
-- configurable headers and authentication
+Every HTTP request hides a dozen performance and security signals — DNS, TCP, TLS, redirects, compression, caching, CDN routing, and server software.  
+Most tools measure only total latency. net‑benchmark gives you the full picture.
 
-> **Status:** planned for version 0.5.0 — [contributions welcome](CONTRIBUTING.md)
+##### The Problem
+
+- ⏱️ **Hidden bottlenecks** — is the delay DNS, TCP, TLS, or the server itself?
+- 🔗 **Silent redirects** — each hop adds latency you can't see without per‑hop timing
+- 🔒 **Missing security headers** — CSP, HSTS, X‑Frame‑Options often absent
+- 🕵️ **Unknown CDN** — what CDN is actually serving your traffic?
+- 📜 **Expired certificates** — hard to catch before they break production
+
+##### The Solution
+
+net‑benchmark helps you:
+
+- 🔍 **Break down every request** — DNS → TCP → TLS → TTFB → TTLB, all in milliseconds
+- 📊 **Get real stats** — P95, P99, jitter, consistency scores
+- 🛡️ **Audit security** — HSTS, CSP, X‑Frame‑Options, CDN fingerprinting, server header leaks
+- 📜 **Capture TLS certs** — expiry days, CN, issuer, SANs, wildcard detection
+- 🚀 **Test at scale** — 50+ concurrent requests in seconds
+
+##### Perfect For
+
+- ✅ **Developers** optimising API performance
+- ✅ **DevOps/SRE** validating CDN and origin server SLAs
+- ✅ **Security engineers** auditing HTTP security headers and TLS hygiene
+- ✅ **API providers** benchmarking endpoints with auth, headers, and body payloads
+
+---
+
+#### Quick start
+
+```bash
+# Test 5 built‑in targets with a single iteration
+net-benchmark http benchmark --use-defaults
+```
+
+Results are automatically saved to `./benchmark_results/` with summary CSV, detailed raw data, and optional PDF/Excel reports.
+
+```bash
+# First‑run recommendations
+net-benchmark http benchmark --use-defaults --formats csv,excel
+net-benchmark http benchmark --use-defaults --iterations 5   # meaningful jitter/consistency
+```
+
+---
+
+#### ⚡ Commands at a Glance
+
+| Command | What it does | Quick example |
+|---|---|---|
+| `benchmark` | Full HTTP benchmark with exports | `net-benchmark http benchmark --use-defaults` |
+| `top` | Rank all targets by speed | `net-benchmark http top --limit 5` |
+| `compare` | Side‑by‑side target comparison | `net-benchmark http compare api.example.com api2.example.com` |
+| `monitoring` | Continuous monitoring with alerts | `net-benchmark http monitoring --use-defaults` |
+
+```bash
+# Find your fastest endpoint right now
+net-benchmark http top --limit 5
+
+# Compare two APIs side‑by‑side
+net-benchmark http compare api.example.com api2.example.com --iterations 3 --show-details
+
+# Monitor with alerts for 1 hour
+net-benchmark http monitoring --use-defaults \
+  --interval 30 --duration 3600 \
+  --alert-latency 500 --alert-failure-rate 5
+```
+
+---
+
+#### ✨ Key Features
+
+##### 🚀 Performance
+
+- **Async engine** — httpx with HTTP/2, connection pooling, semaphore concurrency
+- **Timing breakdown** — DNS resolve, TCP connect, TLS handshake, TTFB, TTLB, total latency
+- **Multi‑iteration** — run benchmarks multiple times for statistical accuracy
+- **Statistical analysis** — mean, median, P95, P99, jitter, consistency score
+- **Retry with backoff** — exponential backoff on failures (mirrors DNS engine)
+- **Configurable concurrency** — control max concurrent requests
+- **Warmup phase** — optional HEAD or full warmup before measurement
+
+##### 🔒 Security & TLS
+
+- **Security headers audit** — HSTS, CSP, X‑Frame‑Options, X‑Content‑Type‑Options, Referrer‑Policy, Permissions‑Policy
+- **CDN fingerprinting** — detects Cloudflare, CloudFront, Fastly, Akamai, Google, Azure CDN
+- **Server header leak detection** — flags software/version disclosure
+- **Inline TLS cert capture** — expiry days, CN, issuer, SANs, wildcard detection
+- **Downgrade detection** — HTTPS→HTTP redirect chains and HTTP/2→HTTP/1.1 fallback
+- **IPv4 vs IPv6** — dual‑stack detection per request
+- **Alt‑Svc detection** — server advertising HTTP/3
+
+##### 🔐 Auth & Enterprise
+
+- **Basic auth, Bearer token, custom API key** — `--auth basic:user:pass`, `--auth bearer:token`, `--headers x-api-key:key`
+- **mTLS client certificates** — `--cert` + `--cert-key`
+- **Proxy support** — `--proxy http://proxy:8080`
+- **SNI override** — `--sni example.com`
+- **Interface binding** — `--local-address 192.168.1.100`
+- **Request ID injection** — `--inject-request-id` adds X‑Request‑ID header
+- **Custom User‑Agent** — `--user-agent "MyBot/1.0"`
+- **Cookies** — repeatable `--cookie "name=value"` flag
+
+##### 🧪 Assertions & Validation
+
+- **Assert status code** — `--assert status=200`
+- **Assert body contains** — `--assert body_contains=success`
+- **Assert header exists** — `--assert header_exists=X-Cache`
+- **Assert header value** — `--assert header_value=X-Cache=HIT`
+- **Assert max latency** — `--assert max_latency=500`
+- **Assert content‑type** — `--assert content_type=application/json`
+- **Assert response size** — `--assert response_size_min=100`, `--assert response_size_max=10000`
+
+##### 📊 Analysis & Export
+
+- **Multiple formats** — CSV, Excel, PDF, JSON (see [Export formats](#export-formats))
+- **Visual reports** — charts and graphs in Excel/PDF
+- **Per‑target statistics** — latency, TTFB, HTTP/2 rate, redirect rate, compressed size
+- **Cache header analysis** — Cache‑Control, ETag, Last‑Modified, Age presence
+- **Status code distribution** — 2xx/3xx/4xx/5xx breakdown
+- **Error breakdown** — identify problematic targets
+
+---
+
+#### 🔧 HTTP/2, Redirects, and Downgrade Detection
+
+| Feature | What it captures |
+|---|---|
+| HTTP/2 negotiation | ALPN result (`h2` or `http/1.1`) per request |
+| HTTP/2 downgrade detection | Flags when HTTP/2 was expected but HTTP/1.1 was negotiated |
+| Redirect chain | Full hop list with per‑hop URL, status code, and duration |
+| Downgrade detection | Flags any HTTPS→HTTP redirect in the chain |
+| Compressed size | Content‑Length header captured for bandwidth analysis |
+
+```bash
+# Force HTTP/1.1 to compare performance
+net-benchmark http benchmark --use-defaults --no-http2
+
+# Watch redirect chains
+net-benchmark http benchmark --targets https://github.com --iterations 1
+
+# Detect HTTP/2 downgrades (useful behind corporate proxies)
+net-benchmark http benchmark --use-defaults --iterations 3
+```
+
+---
+
+#### 🔒 Security & Auth Examples
+
+```bash
+# Basic auth
+net-benchmark http benchmark \
+  --targets https://httpbin.org/basic-auth/user/pass \
+  --auth "basic:user:pass"
+
+# Bearer token (standard OAuth2)
+net-benchmark http benchmark \
+  --targets https://api.example.com/data \
+  --auth "bearer:sk-abc123"
+
+# Custom API key header (x‑api‑key)
+net-benchmark http benchmark \
+  --targets https://api.example.com/echo \
+  --method POST \
+  --headers "x-api-key:sk-abc123"
+
+# mTLS client certificate
+net-benchmark http benchmark \
+  --targets https://mtls.example.com \
+  --cert client.pem --cert-key client-key.pem
+
+# Proxy with auth
+net-benchmark http benchmark \
+  --targets https://example.com \
+  --proxy http://proxy:8080 \
+  --auth "basic:proxyuser:proxypass"
+```
+
+---
+
+#### 💼 Use Cases
+
+##### 🔧 For Developers: Optimise API Performance
+
+```bash
+# Find fastest endpoint and break down timing
+net-benchmark http benchmark \
+  --targets https://api.myapp.com/v1/users,https://api.myapp.com/v2/users \
+  --method GET \
+  --headers "Authorization:Bearer token" \
+  --iterations 5
+```
+
+**Result:** Pinpoint whether DNS, TCP, TLS, or server logic is the bottleneck.
+
+---
+
+##### 🛡️ For DevOps/SRE: Validate CDN Migration
+
+```bash
+# Compare old origin vs new CDN
+net-benchmark http compare \
+  https://origin.example.com \
+  https://cdn.example.com \
+  --iterations 5 --show-details
+```
+
+**Result:** Data‑driven proof your CDN is (or isn't) faster.
+
+---
+
+##### 🔐 For Security Engineers: Audit Public Endpoints
+
+```bash
+# Full security audit with assertions
+net-benchmark http benchmark \
+  --targets https://www.example.com,https://api.example.com \
+  --assert status=200 \
+  --assert header_exists=strict-transport-security \
+  --assert header_value=X-Content-Type-Options=nosniff \
+  --formats excel,pdf \
+  --output ./security_audit
+```
+
+**Result:** Instant report card of security header coverage and TLS certificate health.
+
+---
+
+##### 🏢 For Enterprise: Automated Health Checks
+
+```bash
+# Add to crontab for hourly reports
+0 * * * * net-benchmark http benchmark \
+  --targets targets.txt \
+  --assert status=200 --assert max_latency=1000 \
+  --formats csv --quiet \
+  --output /var/reports/http/$(date +\%Y\%m\%d_\%H)
+```
+
+**Result:** Automated SLA compliance and performance trending.
+
+---
+
+#### 📖 Usage Examples
+
+##### Basic Usage
+
+```bash
+# Test built‑in defaults
+net-benchmark http benchmark --use-defaults
+
+# Custom targets from file
+net-benchmark http benchmark --targets ./targets.txt
+
+# Inline targets (comma‑separated)
+net-benchmark http benchmark --targets "https://example.com,https://httpbin.org/get"
+
+# Quick test with only CSV output
+net-benchmark http benchmark --use-defaults --formats csv --quiet
+
+# Multiple iterations for statistical accuracy
+net-benchmark http benchmark --use-defaults --iterations 5
+
+# Custom HTTP method with body
+net-benchmark http benchmark \
+  --targets https://api.example.com/echo \
+  --method POST \
+  --body '{"action":"test"}'
+
+# Body from file
+echo '{"name":"test","value":42}' > payload.json
+net-benchmark http benchmark \
+  --targets https://api.example.com/echo \
+  --method POST \
+  --body-file payload.json
+```
+
+##### Advanced Usage
+
+```bash
+# Export all formats with charts
+net-benchmark http benchmark \
+  --use-defaults \
+  --formats csv,excel,pdf \
+  --include-charts \
+  --json \
+  --output ./full_report
+
+# Separate timeout control
+net-benchmark http benchmark \
+  --targets https://slow-api.example.com \
+  --connect-timeout 5 --read-timeout 30 --write-timeout 10
+
+# Query parameters without hacking the URL
+net-benchmark http benchmark \
+  --targets https://api.example.com/search \
+  --params "page=1,limit=50,q=test"
+
+# High concurrency with warmup
+net-benchmark http benchmark \
+  --use-defaults \
+  --max-concurrent 100 \
+  --warmup-fast \
+  --iterations 3
+
+# Full assertion suite
+net-benchmark http benchmark \
+  --targets https://api.example.com/health \
+  --assert status=200 \
+  --assert body_contains=ok \
+  --assert max_latency=500 \
+  --assert content_type=application/json \
+  --assert response_size_min=10
+```
+
+##### CI/CD Integration
+
+```yaml
+- name: HTTP Endpoint Health Check
+  run: |
+    pip install net-benchmark
+    net-benchmark http benchmark \
+      --targets "https://api.prod.example.com/health,https://web.prod.example.com" \
+      --assert status=200 \
+      --assert max_latency=1000 \
+      --formats csv \
+      --quiet
+```
+
+---
+
+#### ⚡ CLI Commands
+
+##### 🚀 Top
+
+Quickly rank targets by speed or reliability.
+
+```bash
+# Rank default targets by latency
+net-benchmark http top --use-defaults --limit 5
+
+# Rank by TTFB
+net-benchmark http top --use-defaults --limit 5 --metric ttfb
+
+# Rank by success rate
+net-benchmark http top --targets targets.txt --limit 10 --metric success
+```
+
+---
+
+##### 📊 Compare
+
+Benchmark specific targets side‑by‑side with detailed statistics.
+
+```bash
+# Compare two targets
+net-benchmark http compare https://example.com https://httpbin.org/get
+
+# Auto‑scheme (https:// added if missing)
+net-benchmark http compare api.example.com api2.example.com
+
+# With auth and iterations
+net-benchmark http compare api.example.com api2.example.com \
+  --auth "bearer:token" --iterations 5
+
+# Show per‑iteration breakdown
+net-benchmark http compare api.example.com api2.example.com \
+  --iterations 3 --show-details
+
+# Export comparison
+net-benchmark http compare api.example.com api2.example.com \
+  --output comparison.csv
+```
+
+---
+
+##### 🔄 Monitoring
+
+Continuously monitor targets with configurable alerts.
+
+```bash
+# Monitor defaults every 60 seconds
+net-benchmark http monitoring --use-defaults
+
+# Monitor with custom targets and alerts
+net-benchmark http monitoring \
+  --targets targets.txt \
+  --interval 30 \
+  --duration 3600 \
+  --alert-latency 500 \
+  --alert-failure-rate 5 \
+  --output ./monitoring_logs
+
+# Monitor behind a proxy
+net-benchmark http monitoring \
+  --targets https://internal-api.example.com \
+  --proxy http://proxy:8080 \
+  --interval 60
+```
+
+---
+
+##### 🌟 Command Showcase
+
+| Command | Purpose | Typical Use Case | Key Options | Output |
+|---|---|---|---|---|
+| **top** | Quick ranking of targets by speed/reliability | Fast check to see which endpoint is best right now | `--limit`, `--metric`, `--iterations` | Sorted list with latency & success rate |
+| **compare** | Side‑by‑side comparison of specific targets | Detailed benchmarking across chosen endpoints | `--iterations`, `--show-details`, `--output` | Table with latency, TTFB, success rate, per‑iteration breakdown |
+| **monitoring** | Continuous monitoring with alerts | Real‑time tracking of endpoint health over time | `--interval`, `--duration`, `--alert-latency`, `--alert-failure-rate`, `--output` | Live status, alerts, per‑interval JSON snapshots |
+
+---
+
+#### ⚡ Best Practices
+
+| Mode | Recommended Flags | Purpose |
+|---|---|---|
+| **Quick Run** | `--iterations 1 --warmup-fast` | Fast feedback, lightweight warmup |
+| **Thorough Run** | `--iterations 5 --warmup --timeout 10 --retries 2` | Multiple passes, full warmup, best for detailed benchmarking |
+| **Debug Mode** | `--iterations 1 --timeout 30 --retries 0` | Long timeout, no retries, useful for diagnosing endpoint issues |
+| **API Testing** | `--method POST --body '{}' --headers "Auth:token" --assert status=200` | Send payloads and validate responses |
+
+---
+
+#### 📊 What the Summary Shows
+
+```text
+============================================
+| Total requests:   5                      |
+| Successful:       4 (80.00%)             |
+| Avg latency:      1047.25 ms             |
+| Avg TTFB:         772.20 ms              |
+| HTTP/2 rate:      100.0%                 |
+| HSTS coverage:    60.0%                  |
+| Assertion pass:   100.0%                 |
+| Fastest target:   https://www.apple.com  |
+| Slowest target:   https://www.github.com |
+============================================
+```
+
+---
+
+#### 🔧 Troubleshooting
+
+```bash
+# Command not found
+pip install -e .
+python -m net_benchmark.http_bench.cli --help
+
+# PDF generation fails (Ubuntu/Debian) – see PDF dependencies
+sudo apt-get install libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
+  libgdk-pixbuf2.0-0 libffi-dev shared-mime-info
+# Or skip PDF
+net-benchmark http benchmark --use-defaults --formats csv,excel
+
+# Network timeouts
+net-benchmark http benchmark --use-defaults --timeout 30 --retries 3
+net-benchmark http benchmark --use-defaults --max-concurrent 10
+
+# SSL errors on internal servers
+net-benchmark http benchmark --targets https://internal.local --no-verify-ssl
+```
+
+---
+
+#### Getting help
+
+```bash
+net-benchmark http --help
+net-benchmark http benchmark --help
+net-benchmark http top --help
+net-benchmark http compare --help
+net-benchmark http monitoring --help
+```
+
+Common scenarios:
+
+```bash
+# I'm new — where to start?
+net-benchmark http benchmark --use-defaults
+
+# Test a specific API with auth
+net-benchmark http benchmark \
+  --targets https://api.example.com/echo \
+  --method POST \
+  --headers "x-api-key:sk-abc123" \
+  --body '{"test":true}'
+
+# Generate a security audit report
+net-benchmark http benchmark \
+  --targets https://www.example.com \
+  --assert status=200 \
+  --assert header_exists=strict-transport-security \
+  --formats excel,pdf \
+  --output ./security_audit
+```
+
+---
+
+#### ❓ FAQ
+
+**Why is my API slower than expected?**
+The timing breakdown (DNS → TCP → TLS → TTFB → TTLB) tells you exactly where the time goes. If DNS is slow, check your resolver. If TLS is slow, check certificate chain size or OCSP stapling. If TTFB is slow, the server logic or database is the bottleneck.
+
+**How often should I benchmark HTTP endpoints?**
+- **One‑time**: When choosing a CDN or API provider
+- **Daily**: For critical production endpoints
+- **Before deployment**: To catch performance regressions
+- **After incidents**: To validate fixes
+
+**Can I test endpoints behind authentication?**
+Yes — `--auth basic:user:pass`, `--auth bearer:token`, or `--headers x-api-key:key` all work. mTLS is also supported via `--cert` and `--cert-key`.
+
+**Is this tool safe to use in production?**
+Yes! It only performs standard HTTP requests (read operations). It does not modify data, perform attacks, or send data to external servers.
+
+**Why do results vary between runs?**
+HTTP performance varies due to network conditions, server load, CDN routing changes, and TLS session resumption. Run multiple iterations (`--iterations 5`) for more consistent results. Use `--warmup-fast` to absorb cold‑start effects.
 
 </details>
 
@@ -1307,6 +1828,24 @@ Run multiple iterations (`--iterations 5`) for more consistent results.
 
 By default, the tool supports **CSV** and **Excel** exports.  
 PDF export requires the extra dependency **weasyprint**, which is not installed automatically to avoid runtime issues on some platforms.
+
+### HTTP‑specific exports
+
+| CSV file | Contents |
+|----------|----------|
+| `*_raw.csv` | Individual request results with timing breakdown |
+| `*_summary.csv` | Per‑target aggregated statistics |
+| `*_security.csv` | Security headers presence matrix |
+| `*_ttfb.csv` | Time‑to‑first‑byte analysis |
+| `*_protocols.csv` | HTTP/1.1 vs HTTP/2 distribution |
+
+### Excel report (HTTP)
+
+- **Raw Data** sheet: all requests with timing, security headers, cert details
+- **Target Summary** sheet: comprehensive per‑target statistics
+- **TTFB Analysis** sheet: TTFB percentiles per target
+- **Security Headers** sheet: colour‑coded presence matrix
+- **Charts** sheet: latency comparison, TTFB comparison, success rates (optional)
 
 #### Install with PDF support
 

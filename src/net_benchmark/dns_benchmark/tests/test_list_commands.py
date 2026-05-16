@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from net_benchmark.dns_benchmark.cli import cli
+from net_benchmark.cli import cli
 
 
 def test_list_defaults():

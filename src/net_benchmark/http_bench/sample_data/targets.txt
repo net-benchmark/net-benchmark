@@ -1,0 +1,9 @@
+# Popular domains for HTTP benchmarking
+https://stackoverflow.com
+https://github.com
+https://www.microsoft.com
+https://www.amazon.com
+https://www.mozilla.org
+https://www.nytimes.com
+https://www.reddit.com
+https://httpbin.org/get

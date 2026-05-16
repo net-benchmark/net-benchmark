@@ -4,7 +4,8 @@ fast, extensible network benchmarking — dns, http, and ssl from a single cli.
 
 [![PyPI version](https://badge.fury.io/py/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![Python](https://img.shields.io/pypi/pyversions/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![License](https://img.shields.io/badge/license-MIT-yellow.svg)
+
 [![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
 
@@ -48,11 +49,33 @@ full documentation: [github.com/net-benchmark/net-benchmark](https://github.com/
 </details>
 
 <details>
-<summary><strong>http benchmark</strong> — endpoint latency and availability <em>(coming 0.5.0)</em></summary>
+<summary><strong>http benchmark</strong> — latency, ttfb, security headers, tls certs</summary>
 
 ```bash
-net-benchmark http benchmark --targets "https://api.example.com"
+net-benchmark http benchmark --use-defaults
+net-benchmark http benchmark --use-defaults --iterations 5
+net-benchmark http benchmark --targets "https://api.example.com" --method POST --body '{}'
+net-benchmark http compare api.example.com api2.example.com --iterations 3
+net-benchmark http top --use-defaults --limit 5
+net-benchmark http monitoring --use-defaults --interval 30
 ```
+
+| flag | description | default |
+|---|---|---|
+| `--use-defaults` | built-in target urls | — |
+| `--targets` | comma-separated urls or file | — |
+| `--method` | http verb (get, post, etc.) | `get` |
+| `--headers` | `"key:value,key2:value2"` | — |
+| `--body` | inline request body (e.g. json) | — |
+| `--body-file` | path to body file | — |
+| `--auth` | `basic:user:pass` or `bearer:token` | — |
+| `--cert` / `--cert-key` | mtls client certificate | — |
+| `--proxy` | proxy url | — |
+| `--assert` | repeatable: `status=200`, `body_contains=ok`, `max_latency=500`, etc. | — |
+| `--iterations` | requests per target | `1` |
+| `--no-http2` | force http/1.1 | `false` |
+| `--no-verify-ssl` | skip tls verification | `false` |
+| `--formats` | csv, excel, pdf, json | `csv,excel,pdf` |
 
 full documentation: [github.com/net-benchmark/net-benchmark](https://github.com/net-benchmark/net-benchmark#http-benchmark)
 
