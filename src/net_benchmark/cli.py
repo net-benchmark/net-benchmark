@@ -7,7 +7,13 @@ from colorama import Fore, Style, init
 from net_benchmark import __version__
 from net_benchmark.dns_benchmark.cli import dns as dns_group
 from net_benchmark.http_bench.cli import http as http_group
-from net_benchmark.ssl_check.cli import ssl as ssl_group
+
+# from net_benchmark.ssl_check.cli import ssl as ssl_group
+
+try:
+    from net_benchmark.ssl_check.cli import ssl as ssl_group
+except ImportError:
+    ssl_group = None  # type:ignore
 
 # Initialize colorama
 init()
@@ -32,7 +38,8 @@ def cli() -> None:
         print()
 
 
-# Attach sub‑command groups
 cli.add_command(dns_group)
 cli.add_command(http_group)
-cli.add_command(ssl_group)
+# cli.add_command(ssl_group)
+if ssl_group is not None:
+    cli.add_command(ssl_group)
