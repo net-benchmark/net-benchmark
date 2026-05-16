@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 import click
 import pyfiglet
@@ -10,10 +11,12 @@ from net_benchmark.http_bench.cli import http as http_group
 
 # from net_benchmark.ssl_check.cli import ssl as ssl_group
 
+ssl_group: Optional[click.Group] = None
+
 try:
-    from net_benchmark.ssl_check.cli import ssl as ssl_group
+    from net_benchmark.ssl_check.cli import ssl as ssl_group  # noqa: F811
 except ImportError:
-    ssl_group = None  # type:ignore
+    pass
 
 # Initialize colorama
 init()
