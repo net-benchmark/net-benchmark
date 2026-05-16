@@ -1,18 +1,14 @@
 import asyncio
 import json
 import math
-import os
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
-import pyfiglet
 from colorama import Fore, Style, init
-from tqdm import tqdm
 
-from net_benchmark import __version__
 from net_benchmark.dns_benchmark.analysis import BenchmarkAnalyzer
 from net_benchmark.dns_benchmark.core import (
     DNSQueryEngine,
@@ -28,6 +24,7 @@ from net_benchmark.dns_benchmark.exporters import (
     ExportBundle,
     PDFExporter,
 )
+from net_benchmark.utils.helpers import create_progress_bar
 from net_benchmark.utils.messages import (
     error,
     info,
@@ -42,37 +39,11 @@ from net_benchmark.utils.protocols import _resolve_protocol_and_doh_urls
 init()
 
 
-@click.group()
-@click.version_option(__version__, prog_name="net-benchmark")
-def cli() -> None:
-    """
-    net-benchmark — DNS, HTTP, and SSL benchmarking suite.
-    CLI entry point.
-    """
-    # Allow suppression of banner for CI/CD
-    if not os.environ.get("NO_BANNER"):
-        print(Fore.GREEN + pyfiglet.figlet_format("net-benchmark") + Style.RESET_ALL)
-        print(Fore.CYAN + "dns · http · ssl benchmarking suite" + Style.RESET_ALL)
-        print(
-            Fore.YELLOW
-            + "https://github.com/net-benchmark/net-benchmark"
-            + Style.RESET_ALL
-        )
-        print()
-
-
-def create_progress_bar(total: int, desc: str) -> Any:
-    return tqdm(
-        total=total, desc=info(desc), bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}"
-    )
-
-
-@cli.group(invoke_without_command=True)
-@click.pass_context
-def dns(ctx: click.Context) -> None:
-    """benchmark dns resolvers — doh, dot, dnssec supported."""
-    if ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
+# ── DNS command group ─────────────────────────────────────────────────────────
+@click.group(name="dns")
+def dns() -> None:
+    """Benchmark DNS resolvers — DoH, DoT, DNSSEC supported."""
+    pass
 
 
 # =================== Benchmark command
@@ -1689,36 +1660,5 @@ settings:
     click.echo(summary_box(summary_lines))
 
 
-# ##################################### HTTP Benchmark ############################
-
-
-@cli.group()
-def http() -> None:
-    """benchmark http/https endpoints. (coming in 0.5.0)"""
-    pass
-
-
-@http.command()
-def bench() -> None:  # named bench to avoid clash with dns benchmark
-    """benchmark http/https targets for latency and availability."""
-    click.echo(info("http benchmark coming in net-benchmark 0.5.0"))
-    click.echo(info("follow progress: https://github.com/net-benchmark/net-benchmark"))
-
-
-# ##################################### SSL Check ############################
-
-
-@cli.group()
-def ssl_grp() -> None:  # named ssl_grp to avoid stdlib ssl conflict at module level
-    """check ssl certificate expiry and chain validity. (coming in 0.6.0)"""
-    pass
-
-
-cli.add_command(ssl_grp, name="ssl")
-
-
-@ssl_grp.command()
-def check() -> None:
-    """check ssl certificate expiry and chain validity."""
-    click.echo(info("ssl check coming in net-benchmark 0.6.0"))
-    click.echo(info("follow progress: https://github.com/net-benchmark/net-benchmark"))
+# alias for backward compatibility with tests and old scripts
+cli = dns

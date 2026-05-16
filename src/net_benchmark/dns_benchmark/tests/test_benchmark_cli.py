@@ -12,12 +12,10 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from net_benchmark.dns_benchmark.cli import (
-    _resolve_protocol_and_doh_urls,
-    cli,
-    create_progress_bar,
-)
+from net_benchmark.cli import cli
 from net_benchmark.dns_benchmark.core import DNSQueryResult, QueryProtocol, QueryStatus
+from net_benchmark.utils.helpers import create_progress_bar
+from net_benchmark.utils.protocols import _resolve_protocol_and_doh_urls
 
 
 @pytest.fixture
