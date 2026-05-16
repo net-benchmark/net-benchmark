@@ -52,10 +52,10 @@ Thumbs.db
 # Project Specific
 # -----------------
 benchmark_results/
+monitoring_results/
 release.sh
 release-tag.sh
 gpg-check.sh
 {outdir}
 notes/
-# src/net_benchmark/http_bench/
 src/net_benchmark/ssl_check/
