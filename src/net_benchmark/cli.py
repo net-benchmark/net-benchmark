@@ -14,7 +14,9 @@ from net_benchmark.http_bench.cli import http as http_group
 ssl_group: Optional[click.Group] = None
 
 try:
-    from net_benchmark.ssl_check.cli import ssl as ssl_group  # noqa: F811
+    from net_benchmark.ssl_check.cli import ssl as _ssl  # noqa: F811
+
+    ssl_group = _ssl
 except ImportError:
     pass
 
