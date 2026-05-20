@@ -1,17 +1,19 @@
 import os
 import sys
+
 import sphinx.builders.latex
+from sphinx.application import Sphinx
 
 sys.path.insert(0, os.path.abspath("../../src"))
 
 
-def skip_autosummary_for_latex(app):
+def skip_autosummary_for_latex(app: Sphinx) -> None:
     # Disable autosummary generation ONLY for LaTeX/PDF builds
     if isinstance(app.builder, sphinx.builders.latex.LaTeXBuilder):
-        app.config.autosummary_generate = False
+        setattr(app.config, "autosummary_generate", False)
 
-x
-def setup(app):
+
+def setup(app: Sphinx) -> None:
     app.connect("builder-inited", skip_autosummary_for_latex)
 
 
@@ -51,9 +53,21 @@ autodoc_default_options = {
     "member-order": "bysource",
 }
 autodoc_mock_imports = [
-    "dns", "dnspython", "httpx", "pandas", "aiohttp",
-    "pyfiglet", "colorama", "jinja2", "openpyxl", "yaml",
-    "tqdm", "matplotlib", "PIL", "weasyprint", "click",
+    "dns",
+    "dnspython",
+    "httpx",
+    "pandas",
+    "aiohttp",
+    "pyfiglet",
+    "colorama",
+    "jinja2",
+    "openpyxl",
+    "yaml",
+    "tqdm",
+    "matplotlib",
+    "PIL",
+    "weasyprint",
+    "click",
 ]
 
 autosummary_generate = True
@@ -87,7 +101,12 @@ html_context = {
 }
 
 latex_documents = [
-    (master_doc, "net-benchmark.tex", "net-benchmark Documentation",
-     "Joseph Oseh Frank", "manual"),
+    (
+        master_doc,
+        "net-benchmark.tex",
+        "net-benchmark Documentation",
+        "Joseph Oseh Frank",
+        "manual",
+    ),
 ]
 epub_show_urls = "footnote"
