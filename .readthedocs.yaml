@@ -1,0 +1,22 @@
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.11"
+
+sphinx:
+  configuration: docs/source/conf.py
+  fail_on_warning: false
+
+python:
+  install:
+    - method: pip
+      path: .
+      extra_requirements:
+        - pdf
+    - requirements: docs/requirements.txt
+
+formats:
+  - pdf
+  - epub
