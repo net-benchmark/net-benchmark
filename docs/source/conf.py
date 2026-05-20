@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import datetime
 
 import sphinx.builders.latex
 from sphinx.application import Sphinx
@@ -7,18 +8,31 @@ from sphinx.application import Sphinx
 sys.path.insert(0, os.path.abspath("../../src"))
 
 
+_PERSONAL_START_YEAR = 2025  # original personal repo
+_CURRENT_YEAR = datetime.now().year
+
+_YEAR_RANGE = (
+    str(_CURRENT_YEAR)
+    if _CURRENT_YEAR == _PERSONAL_START_YEAR
+    else f"{_PERSONAL_START_YEAR}–{_CURRENT_YEAR}"
+)
+
+
 def skip_autosummary_for_latex(app: Sphinx) -> None:
-    # Disable autosummary generation ONLY for LaTeX/PDF builds
+    """Disable autosummary stub generation for LaTeX/PDF builds."""
     if isinstance(app.builder, sphinx.builders.latex.LaTeXBuilder):
-        setattr(app.config, "autosummary_generate", False)
+        from typing import Any
+
+        config: Any = app.config
+        config.autosummary_generate = False
 
 
 def setup(app: Sphinx) -> None:
-    app.connect("builder-inited", skip_autosummary_for_latex)
+    app.connect("config-inited", skip_autosummary_for_latex)
 
 
 project = "net-benchmark"
-copyright = "2026, Joseph Oseh Frank"
+copyright = f"{_YEAR_RANGE}, Joseph Oseh Frank and net-benchmark contributors"
 author = "Joseph Oseh Frank"
 release = "0.5.0"
 version = "0.5"
