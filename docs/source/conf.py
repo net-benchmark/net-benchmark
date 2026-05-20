@@ -1,7 +1,19 @@
 import os
 import sys
+import sphinx.builders.latex
 
 sys.path.insert(0, os.path.abspath("../../src"))
+
+
+def skip_autosummary_for_latex(app):
+    # Disable autosummary generation ONLY for LaTeX/PDF builds
+    if isinstance(app.builder, sphinx.builders.latex.LaTeXBuilder):
+        app.config.autosummary_generate = False
+
+x
+def setup(app):
+    app.connect("builder-inited", skip_autosummary_for_latex)
+
 
 project = "net-benchmark"
 copyright = "2026, Joseph Oseh Frank"
