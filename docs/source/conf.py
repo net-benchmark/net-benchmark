@@ -3,7 +3,6 @@ import sys
 from datetime import datetime
 
 from mypy.exportjson import Config
-import sphinx.builders.latex
 from sphinx.application import Sphinx
 
 sys.path.insert(0, os.path.abspath("../../src"))
@@ -21,11 +20,7 @@ _YEAR_RANGE = (
 
 def skip_autosummary_for_latex(app: Sphinx, config: Config) -> None:
     """Disable autosummary stub generation for LaTeX/PDF builds."""
-    if isinstance(app.builder, sphinx.builders.latex.LaTeXBuilder):
-        from typing import Any
-
-        config: Any = app.config
-        config.autosummary_generate = False
+    setattr(config, "autosummary_generate", False)
 
 
 def setup(app: Sphinx) -> None:
