@@ -1,11 +1,15 @@
 import os
 import sys
 from datetime import datetime
+from typing import TYPE_CHECKING
 
-from mypy.exportjson import Config
 from sphinx.application import Sphinx
 
 sys.path.insert(0, os.path.abspath("../../src"))
+
+
+if TYPE_CHECKING:
+    from sphinx.config import Config
 
 
 _PERSONAL_START_YEAR = 2025  # original personal repo
@@ -18,9 +22,12 @@ _YEAR_RANGE = (
 )
 
 
-def skip_autosummary_for_latex(app: Sphinx, config: Config) -> None:
+def skip_autosummary_for_latex(app: Sphinx, config: "Config") -> None:
     """Disable autosummary stub generation for LaTeX/PDF builds."""
-    setattr(config, "autosummary_generate", False)
+    from sphinx.builders.latex import LaTeXBuilder
+
+    if isinstance(app.builder, LaTeXBuilder):
+        setattr(config, "autosummary_generate", False)
 
 
 def setup(app: Sphinx) -> None:
