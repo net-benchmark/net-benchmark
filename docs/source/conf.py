@@ -2,6 +2,7 @@ import os
 import sys
 from datetime import datetime
 
+from mypy.exportjson import Config
 import sphinx.builders.latex
 from sphinx.application import Sphinx
 
@@ -18,7 +19,7 @@ _YEAR_RANGE = (
 )
 
 
-def skip_autosummary_for_latex(app: Sphinx) -> None:
+def skip_autosummary_for_latex(app: Sphinx, config: Config) -> None:
     """Disable autosummary stub generation for LaTeX/PDF builds."""
     if isinstance(app.builder, sphinx.builders.latex.LaTeXBuilder):
         from typing import Any
