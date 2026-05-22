@@ -2,12 +2,21 @@ import os
 import sys
 from datetime import datetime
 
+from jinja2.environment import Environment
+
+if not hasattr(Environment, "install_gettext_translations"):
+
+    def _dummy_install_gettext(self, translations, newstyle=None):
+        pass
+
+    Environment.install_gettext_translations = _dummy_install_gettext
+# ---------------------------------------------------------------------
+
 from sphinx.application import Sphinx
 
 sys.path.insert(0, os.path.abspath("../../src"))
 
-
-_PERSONAL_START_YEAR = 2025  # original personal repo
+_PERSONAL_START_YEAR = 2025
 _CURRENT_YEAR = datetime.now().year
 
 _YEAR_RANGE = (
@@ -15,18 +24,6 @@ _YEAR_RANGE = (
     if _CURRENT_YEAR == _PERSONAL_START_YEAR
     else f"{_PERSONAL_START_YEAR}–{_CURRENT_YEAR}"
 )
-
-
-def patch_jinja2_sandbox(app: Sphinx) -> None:
-    """Add install_gettext_translations to Jinja2's SandboxedEnvironment if missing."""
-    from jinja2.sandbox import SandboxedEnvironment
-
-    if not hasattr(SandboxedEnvironment, "install_gettext_translations"):
-
-        def _dummy_install_gettext(self, *args, **kwargs):
-            pass
-
-        SandboxedEnvironment.install_gettext_translations = _dummy_install_gettext
 
 
 def skip_autosummary_for_latex(app: Sphinx) -> None:
@@ -38,8 +35,6 @@ def skip_autosummary_for_latex(app: Sphinx) -> None:
 
 
 def setup(app: Sphinx) -> None:
-    # Priority 1000 ensures this runs before autosummary’s own builder‑inited handler
-    app.connect("builder-inited", patch_jinja2_sandbox, priority=1000)
     app.connect("builder-inited", skip_autosummary_for_latex, priority=900)
 
 
