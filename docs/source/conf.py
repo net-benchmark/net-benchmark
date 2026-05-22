@@ -2,12 +2,27 @@ import os
 import sys
 from datetime import datetime
 
+from jinja2.sandbox import SandboxedEnvironment
+
+
+def _dummy_install_gettext_translations(self, translations, newstyle=None):
+    """Provide dummy gettext functions that just return the input string."""
+    self.globals.setdefault("_", lambda x: x)
+    self.globals.setdefault("gettext", lambda x: x)
+    self.globals.setdefault("ngettext", lambda s, p, n: (s if n == 1 else p))
+
+
+if not hasattr(SandboxedEnvironment, "install_gettext_translations"):
+    SandboxedEnvironment.install_gettext_translations = (
+        _dummy_install_gettext_translations
+    )
+# --------------------------------------------------------------------------------------
+
 from sphinx.application import Sphinx
 
 sys.path.insert(0, os.path.abspath("../../src"))
 
-
-_PERSONAL_START_YEAR = 2025  # original personal repo
+_PERSONAL_START_YEAR = 2025
 _CURRENT_YEAR = datetime.now().year
 
 _YEAR_RANGE = (
