@@ -2,21 +2,12 @@ import os
 import sys
 from datetime import datetime
 
-from jinja2.environment import Environment
-
-if not hasattr(Environment, "install_gettext_translations"):
-
-    def _dummy_install_gettext(self, translations, newstyle=None):
-        pass
-
-    Environment.install_gettext_translations = _dummy_install_gettext
-# ---------------------------------------------------------------------
-
 from sphinx.application import Sphinx
 
 sys.path.insert(0, os.path.abspath("../../src"))
 
-_PERSONAL_START_YEAR = 2025
+
+_PERSONAL_START_YEAR = 2025  # original personal repo
 _CURRENT_YEAR = datetime.now().year
 
 _YEAR_RANGE = (
