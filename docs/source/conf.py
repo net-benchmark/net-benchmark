@@ -87,7 +87,7 @@ autodoc_mock_imports = [
     "aiohttp",
     "pyfiglet",
     "colorama",
-    "jinja2",
+    # "jinja2",
     "openpyxl",
     "yaml",
     "tqdm",
