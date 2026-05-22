@@ -17,6 +17,18 @@ _YEAR_RANGE = (
 )
 
 
+def patch_jinja2_sandbox(app: Sphinx) -> None:
+    """Add install_gettext_translations to Jinja2's SandboxedEnvironment if missing."""
+    from jinja2.sandbox import SandboxedEnvironment
+
+    if not hasattr(SandboxedEnvironment, "install_gettext_translations"):
+
+        def _dummy_install_gettext(self, *args, **kwargs):
+            pass
+
+        SandboxedEnvironment.install_gettext_translations = _dummy_install_gettext
+
+
 def skip_autosummary_for_latex(app: Sphinx) -> None:
     """Disable autosummary stub generation for LaTeX/PDF builds."""
     from sphinx.builders.latex import LaTeXBuilder
@@ -26,7 +38,9 @@ def skip_autosummary_for_latex(app: Sphinx) -> None:
 
 
 def setup(app: Sphinx) -> None:
-    app.connect("builder-inited", skip_autosummary_for_latex)
+    # Priority 1000 ensures this runs before autosummary’s own builder‑inited handler
+    app.connect("builder-inited", patch_jinja2_sandbox, priority=1000)
+    app.connect("builder-inited", skip_autosummary_for_latex, priority=900)
 
 
 project = "net-benchmark"
