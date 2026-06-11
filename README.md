@@ -2,23 +2,32 @@
 
 fast, extensible network benchmarking — dns, http, and ssl from a single cli.
 
+**Demo**
+
+[![Demo](src/net_benchmark/gifs/net_benchmark_demo_1280.gif)](https://github.com/net-benchmark/net-benchmark)
+*Watch the full 2:09 demo of DNS & HTTP benchmarks*
+
+**If you find this useful, consider giving it a ⭐ — it helps others discover the project.**
+
 [![PyPI version](https://badge.fury.io/py/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![Python](https://img.shields.io/pypi/pyversions/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
+[![Docs](https://readthedocs.org/projects/net-benchmark/badge/?version=latest)](https://net-benchmark.readthedocs.io/en/latest/)
+[![Discussions](https://img.shields.io/github/discussions/net-benchmark/net-benchmark)](https://github.com/net-benchmark/net-benchmark/discussions)
+[![PyPI - Wheel](https://img.shields.io/pypi/wheel/net-benchmark)](https://pypi.org/project/net-benchmark)
+[![GitHub Stars](https://img.shields.io/github/stars/net-benchmark/net-benchmark?style=social)](https://github.com/net-benchmark/net-benchmark/stargazers)
 
 ```bash
 pip install net-benchmark
 pip install net-benchmark[pdf]   # with pdf export
 ```
 
-> successor to [dns-benchmark-tool](https://github.com/net-benchmark/dns-benchmark-tool) — fully backward compatible.
+> **Successor to [dns-benchmark-tool](https://github.com/net-benchmark/dns-benchmark-tool)** — fully backward compatible.
 > `dns-benchmark` command still works as an alias.
 
----
-
-## Table of contents
+## Table of Contents
 
 - [Installation](#installation)
 - [Tools](#tools)
@@ -1990,7 +1999,10 @@ net-benchmark dns generate-config \
 
 ### Official
 
+- **Documentation**: [net-benchmark](https://net-benchmark.readthedocs.io/en/latest/)
+
 - **GitHub**: [net-benchmark/net-benchmark](https://github.com/net-benchmark/net-benchmark)
+
 - **PyPI**: [net-benchmark](https://pypi.org/project/net-benchmark)
 
 ### Community
