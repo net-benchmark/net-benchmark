@@ -8,6 +8,10 @@ fast, extensible network benchmarking — dns, http, and ssl from a single cli.
 
 [![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
+[![Docs](https://readthedocs.org/projects/net-benchmark/badge/?version=latest)](https://net-benchmark.readthedocs.io/en/latest/)
+[![Discussions](https://img.shields.io/github/discussions/net-benchmark/net-benchmark)](https://github.com/net-benchmark/net-benchmark/discussions)
+[![PyPI - Wheel](https://img.shields.io/pypi/wheel/net-benchmark)](https://pypi.org/project/net-benchmark)
+[![GitHub Stars](https://img.shields.io/github/stars/net-benchmark/net-benchmark?style=social)](https://github.com/net-benchmark/net-benchmark/stargazers)
 
 ```bash
 pip install net-benchmark
@@ -107,7 +111,9 @@ full documentation: [github.com/net-benchmark/net-benchmark](https://github.com/
 
 ## links
 
+- documentation: [net-benchmark](https://net-benchmark.readthedocs.io/en/latest/)
 - repository: [github.com/net-benchmark/net-benchmark](https://github.com/net-benchmark/net-benchmark)
+- discussions: [GitHub Discussions](https://github.com/net-benchmark/net-benchmark/discussions)
 - issues: [github.com/net-benchmark/net-benchmark/issues](https://github.com/net-benchmark/net-benchmark/issues)
 - changelog: [github.com/net-benchmark/net-benchmark/blob/main/CHANGELOG.md](https://github.com/net-benchmark/net-benchmark/blob/main/CHANGELOG.md)
 - powered by [buildtools.net](https://buildtools.net)

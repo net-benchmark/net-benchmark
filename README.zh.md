@@ -7,6 +7,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
+[![Docs](https://readthedocs.org/projects/net-benchmark/badge/?version=latest)](https://net-benchmark.readthedocs.io/en/latest/)
+[![Discussions](https://img.shields.io/github/discussions/net-benchmark/net-benchmark)](https://github.com/net-benchmark/net-benchmark/discussions)
+[![PyPI - Wheel](https://img.shields.io/pypi/wheel/net-benchmark)](https://pypi.org/project/net-benchmark)
+[![GitHub Stars](https://img.shields.io/github/stars/net-benchmark/net-benchmark?style=social)](https://github.com/net-benchmark/net-benchmark/stargazers)
 
 ```bash
 pip install net-benchmark
@@ -1987,6 +1991,8 @@ net-benchmark dns generate-config \
 ## 链接与支持
 
 ### 官方
+
+- **Documentation**: [net-benchmark](https://net-benchmark.readthedocs.io/en/latest/zh/index.html)
 
 - **GitHub**: [net-benchmark/net-benchmark](https://github.com/net-benchmark/net-benchmark)
 - **PyPI**: [net-benchmark](https://pypi.org/project/net-benchmark)
