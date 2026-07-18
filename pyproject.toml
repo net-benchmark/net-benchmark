@@ -62,7 +62,7 @@ Tracker = "https://github.com/net-benchmark/net-benchmark/issues"
 Changelog = "https://github.com/net-benchmark/net-benchmark/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-pdf = ["weasyprint>=66.0,<67.0"]
+pdf = ["weasyprint>=66.0,<70.0"]
 websocket = ["aiohttp>=3.8,<4.0"]
 
 dev = [
