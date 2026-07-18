@@ -1,4 +1,4 @@
-# Load Testing
+# HTTP Load Testing
 
 `net-benchmark http load-test` runs sustained traffic against one or more
 HTTP targets using three load-shaping strategies. Unlike `benchmark`
