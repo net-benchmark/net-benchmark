@@ -19,6 +19,13 @@ from net_benchmark.http_bench.exporters import (
     HTTPExportBundle,
     HTTPPDFExporter,
 )
+from net_benchmark.http_bench.load_test import LoadTestEngine, LoadTestSummary
+from net_benchmark.http_bench.load_test_exporters import (
+    LoadTestCSVExporter,
+    LoadTestExcelExporter,
+    LoadTestExportBundle,
+    LoadTestPDFExporter,
+)
 from net_benchmark.utils.helpers import create_progress_bar
 from net_benchmark.utils.messages import (
     error,
@@ -763,8 +770,6 @@ def monitoring(
                 )
 
             # ── persist snapshot ──────────────────────────────────────────────
-            import json
-
             snapshot_path = (
                 output_path
                 / f"http_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -1124,6 +1129,380 @@ def compare(
         if progress_bar:
             progress_bar.close()
         click.echo(error(f"Error during comparison: {e}"))
+        raise
+
+
+# ── load-test ──────────────────────────────────────────────────────────────
+@http.command(name="load-test")
+# --- 0.5.1: same --targets/--use-defaults pattern as `benchmark`/`compare`,
+# via TargetManager — multiple targets run concurrently (one LoadTestEngine
+# per target, fanned out with asyncio.gather).
+@click.option(
+    "--targets",
+    "-t",
+    default=None,
+    help="Comma-separated URLs or path to a text file (one URL per line).",
+)
+@click.option("--use-defaults", is_flag=True, help="Use built-in default target URLs.")
+# --- 0.5.1: mode selects which of the three load-shaping strategies runs —
+# see net_benchmark.http_bench.load_test.LoadTestEngine for the actual logic.
+@click.option(
+    "--mode",
+    type=click.Choice(["throughput", "sustained", "ramp-up"], case_sensitive=False),
+    default="throughput",
+    show_default=True,
+    help="Load test mode: throughput (saturate), sustained (fixed rate), "
+    "ramp-up (gradually increase concurrency).",
+)
+@click.option(
+    "--duration",
+    default=10.0,
+    show_default=True,
+    help="Duration in seconds (throughput/sustained modes).",
+)
+@click.option(
+    "--rps",
+    type=float,
+    default=None,
+    help="Target requests/sec — required for --mode sustained.",
+)
+@click.option(
+    "--max-concurrency",
+    default=200,
+    show_default=True,
+    help="Max in-flight concurrent requests (throughput mode).",
+)
+@click.option(
+    "--start-concurrency",
+    default=10,
+    show_default=True,
+    help="Starting concurrency (ramp-up mode).",
+)
+@click.option(
+    "--ramp-concurrency",
+    default=200,
+    show_default=True,
+    help="Peak concurrency to ramp up to (ramp-up mode).",
+)
+@click.option(
+    "--ramp-duration",
+    default=30.0,
+    show_default=True,
+    help="Seconds spent ramping up to peak concurrency (ramp-up mode).",
+)
+@click.option(
+    "--max-total-rps",
+    type=float,
+    default=None,
+    help="Safety ceiling on aggregate requests/sec during ramp-up (default: "
+    "ramp-concurrency * 50). Not a target rate — use --mode sustained for "
+    "that. Only matters against very fast targets where request latency "
+    "alone wouldn't otherwise bound throughput.",
+)
+@click.option(
+    "--hold-duration",
+    default=10.0,
+    show_default=True,
+    help="Seconds to hold at peak concurrency after ramping (ramp-up mode).",
+)
+@click.option("--method", "-m", default="GET", show_default=True, help="HTTP method.")
+@click.option(
+    "--headers",
+    default=None,
+    help='Extra request headers as "Key:Value,Key:Value".',
+)
+@click.option(
+    "--timeout", default=10.0, show_default=True, help="Request timeout in seconds."
+)
+@click.option("--no-http2", is_flag=True, help="Disable HTTP/2 (force HTTP/1.1).")
+@click.option(
+    "--no-verify-ssl", is_flag=True, help="Skip TLS certificate verification."
+)
+# --- 0.5.1: these three toggle the correctness-sensitive/best-effort
+# detection features added in core.py — off by default since they add
+# per-request overhead (extra dict lookups, session-id bookkeeping) that
+# isn't worth paying for on a pure throughput/sustained run unless the
+# person actually wants the data.
+@click.option(
+    "--enable-connection-reuse",
+    is_flag=True,
+    help="Track keep-alive / connection reuse rate (item 4).",
+)
+@click.option(
+    "--enable-tls-resumption",
+    is_flag=True,
+    help="Best-effort TLS session resumption detection (item 6) — "
+    "heuristic based on repeated session IDs, not a certainty.",
+)
+@click.option(
+    "--enable-push-detection",
+    is_flag=True,
+    help="Best-effort HTTP/2 server push detection (item 8) — requires the "
+    "optional 'h2' package; silently reports zero pushes if unavailable.",
+)
+@click.option(
+    "--output",
+    "-o",
+    default="./http_load_test_results",
+    show_default=True,
+    help="Output directory for results.",
+)
+@click.option(
+    "--formats",
+    "-f",
+    default="csv,excel",
+    show_default=True,
+    help="Output formats (csv, excel, pdf, json).",
+)
+@click.option(
+    "--include-charts", is_flag=True, help="Include charts in Excel and PDF exports."
+)
+@click.option("--quiet", is_flag=True, help="Suppress progress output.")
+def load_test(
+    targets: Optional[str],
+    use_defaults: bool,
+    mode: str,
+    duration: float,
+    rps: Optional[float],
+    max_concurrency: int,
+    start_concurrency: int,
+    ramp_concurrency: int,
+    ramp_duration: float,
+    hold_duration: float,
+    max_total_rps: Optional[float],
+    method: str,
+    headers: Optional[str],
+    timeout: float,
+    no_http2: bool,
+    no_verify_ssl: bool,
+    enable_connection_reuse: bool,
+    enable_tls_resumption: bool,
+    enable_push_detection: bool,
+    output: str,
+    formats: str,
+    include_charts: bool,
+    quiet: bool,
+) -> None:
+    """Run a load test against one or more targets — throughput, sustained
+    rate, or ramp-up (0.5.1). Multiple targets run concurrently.
+
+    Examples:
+        net-benchmark http load-test -t https://example.com --mode throughput --duration 15
+        net-benchmark http load-test -t a.com,b.com --mode sustained --rps 50 --duration 30
+        net-benchmark http load-test --use-defaults --mode ramp-up \\
+            --start-concurrency 5 --ramp-concurrency 100 --ramp-duration 20 --hold-duration 10
+    """
+    if not use_defaults and not targets:
+        click.echo(error("Provide --targets or use --use-defaults."))
+        return
+
+    try:
+        target_list = (
+            TargetManager.get_default_targets()
+            if use_defaults
+            else TargetManager.parse_targets_input(targets).targets
+        )
+    except Exception as e:
+        click.echo(error(f"Error loading targets: {e}"))
+        return
+
+    # --- 0.5.1: normalize each target the same way `compare` does, so bare
+    # hostnames work without forcing the person to type https://.
+    target_list = [
+        t if t.startswith(("http://", "https://")) else "https://" + t
+        for t in (t.strip() for t in target_list)
+    ]
+
+    mode_normalized = mode.lower().replace("-", "_")  # "ramp-up" -> "ramp_up"
+
+    if mode_normalized == "sustained" and not rps:
+        click.echo(error("--mode sustained requires --rps."))
+        return
+
+    output_formats = [f.strip().lower() for f in formats.split(",")]
+    for fmt in output_formats:
+        if fmt not in ("csv", "excel", "pdf", "json"):
+            click.echo(
+                error(f"Invalid format '{fmt}'. Must be csv, excel, pdf, or json.")
+            )
+            return
+
+    output_path = Path(output)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    extra_headers: Dict[str, str] = {}
+    if headers:
+        for pair in headers.split(","):
+            if ":" in pair:
+                k, _, v = pair.partition(":")
+                extra_headers[k.strip()] = v.strip()
+
+    if not quiet:
+        click.echo(info("Configuration:"))
+        click.echo(info(f"  Targets:      {len(target_list)}"))
+        click.echo(info(f"  Mode:         {mode_normalized}"))
+        if mode_normalized == "throughput":
+            click.echo(info(f"  Duration:     {duration}s"))
+            click.echo(info(f"  Max conc.:    {max_concurrency}"))
+        elif mode_normalized == "sustained":
+            click.echo(info(f"  Duration:     {duration}s"))
+            click.echo(info(f"  Target RPS:   {rps}"))
+        else:  # ramp_up
+            click.echo(
+                info(f"  Concurrency:  {start_concurrency} -> {ramp_concurrency}")
+            )
+            click.echo(info(f"  Ramp:         {ramp_duration}s, hold {hold_duration}s"))
+            if max_total_rps:
+                click.echo(info(f"  Max total RPS ceiling: {max_total_rps}"))
+        click.echo(
+            info(
+                f"  Connection reuse tracking: {'on' if enable_connection_reuse else 'off'}"
+            )
+        )
+        click.echo(
+            info(
+                f"  TLS resumption detection:  {'on' if enable_tls_resumption else 'off'}"
+            )
+        )
+        click.echo(
+            info(
+                f"  HTTP/2 push detection:     {'on' if enable_push_detection else 'off'}"
+            )
+        )
+        click.echo(warning(f"Starting load test ({mode_normalized})…"))
+
+    start_wall = time.time()
+
+    try:
+        # --- 0.5.1: one HTTPBenchmarkEngine + LoadTestEngine per target
+        # (each origin gets its own connection pool, per core.py's design),
+        # all run concurrently via asyncio.gather.
+        async def _run_one(t: str) -> "LoadTestSummary":
+            http_engine = HTTPBenchmarkEngine(
+                max_concurrent=max(max_concurrency, ramp_concurrency, 50),
+                timeout=timeout,
+                method=method.upper(),
+                headers=extra_headers,
+                http2=not no_http2,
+                verify_ssl=not no_verify_ssl,
+                enable_connection_reuse=enable_connection_reuse,
+                enable_tls_resumption=enable_tls_resumption,
+                enable_push_detection=enable_push_detection,
+            )
+            load_engine = LoadTestEngine(t, http_engine=http_engine)
+            if mode_normalized == "throughput":
+                s = await load_engine.run_throughput(
+                    duration_s=duration, max_concurrency=max_concurrency
+                )
+            elif mode_normalized == "sustained":
+                # type narrowing: we already validated that --rps is present when
+                # mode == "sustained" (see the check above), so mypy would otherwise
+                # complain that `rps` might be None.  The assertion removes that
+                # ambiguity at static‑analysis level and also acts as a safety net
+                # in case someone later moves the validation without adjusting this path.
+                assert rps is not None, "rps must be set for sustained mode"
+                s = await load_engine.run_sustained(target_rps=rps, duration_s=duration)
+            else:  # ramp_up
+                s = await load_engine.run_ramp_up(
+                    start_concurrency=start_concurrency,
+                    max_concurrency=ramp_concurrency,
+                    ramp_duration_s=ramp_duration,
+                    hold_duration_s=hold_duration,
+                    max_total_rps=max_total_rps,
+                )
+            await load_engine.close()
+            return s
+
+        async def _run_all() -> List["LoadTestSummary"]:
+            return await asyncio.gather(*(_run_one(t) for t in target_list))
+
+        summaries = list(asyncio.run(_run_all()))
+
+        wall_elapsed = time.time() - start_wall
+        if not quiet:
+            click.echo(success(f"Load test completed in {wall_elapsed:.2f}s"))
+            # --- 0.5.1: summary.stats is a TargetStats (net_benchmark.http_bench.analysis)
+            # — same stats engine as `http benchmark`. success_rate and
+            # connection_reuse_rate are already 0-100 (percentages); TargetStats
+            # has no p50/p90 fields — median_latency is the p50 equivalent.
+            for summary in summaries:
+                summary_lines = [
+                    f"Target:           {summary.target}",
+                    f"Mode:             {summary.mode.value}",
+                    f"Total requests:   {summary.stats.total_requests}",
+                    f"Successful:       {summary.stats.successful_requests} ({summary.stats.success_rate:.2f}%)",
+                    f"Achieved RPS:     {summary.achieved_rps:.1f}",
+                ]
+                if summary.target_rps:
+                    summary_lines.append(f"Target RPS:       {summary.target_rps:.1f}")
+                summary_lines += [
+                    f"Median latency:   {summary.stats.median_latency:.1f} ms",
+                    f"P95 latency:      {summary.stats.p95_latency:.1f} ms",
+                    f"P99 latency:      {summary.stats.p99_latency:.1f} ms",
+                    f"Connections open: {summary.connection_reuse.connections_opened}",
+                ]
+                if enable_connection_reuse:
+                    summary_lines.append(
+                        f"Reuse rate:       {summary.connection_reuse.reuse_rate * 100:.1f}%"
+                    )
+                if enable_tls_resumption:
+                    summary_lines.append(
+                        f"TLS resumption:   {summary.stats.tls_resumption_rate:.1f}%"
+                    )
+                click.echo(summary_box(summary_lines))
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = f"net_benchmark.load_test_{mode_normalized}_{timestamp}"
+
+        if not quiet:
+            click.echo(warning("Exporting results…"))
+
+        if "csv" in output_formats:
+            LoadTestCSVExporter.export_raw_results(
+                summaries, str(output_path / f"{base_name}_raw.csv")
+            )
+            LoadTestCSVExporter.export_summary(
+                summaries, str(output_path / f"{base_name}_summary.csv")
+            )
+            LoadTestCSVExporter.export_intervals(
+                summaries, str(output_path / f"{base_name}_timeline.csv")
+            )
+            LoadTestCSVExporter.export_error_breakdown(
+                summaries, str(output_path / f"{base_name}_errors.csv")
+            )
+
+        if "excel" in output_formats:
+            LoadTestExcelExporter.export_results(
+                summaries,
+                str(output_path / f"{base_name}.xlsx"),
+                include_charts=include_charts,
+            )
+
+        if "pdf" in output_formats:
+            try:
+                LoadTestPDFExporter.export_results(
+                    summaries,
+                    str(output_path / f"{base_name}.pdf"),
+                    include_charts=include_charts,
+                )
+            except Exception as e:
+                click.echo(error(f"PDF export failed: {e}"))
+
+        if "json" in output_formats:
+            LoadTestExportBundle.export_json(
+                summaries, str(output_path / f"{base_name}.json")
+            )
+
+        if not quiet:
+            click.echo(success("All exports completed!"))
+            click.echo(info(f"Results saved to: {output_path}"))
+
+    except click.UsageError:
+        raise
+    except KeyboardInterrupt:
+        click.echo(warning("\nLoad test interrupted by user"))
+    except Exception as e:
+        click.echo(error(f"Load test error: {e}"))
         raise
 
 

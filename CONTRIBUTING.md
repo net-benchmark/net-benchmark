@@ -48,6 +48,13 @@ We welcome improvements, bug fixes, and new ideas.
 
 ---
 
+## No Paid Work or Crypto Offers
+
+This project does not accept paid proposals, crypto payments, or contracting offers inside GitHub issues or discussions.
+All contributions must be technical and open-source.
+
+---
+
 ## Community
 
 - Be respectful and constructive in discussions.

@@ -53,6 +53,7 @@ Thumbs.db
 # -----------------
 benchmark_results/
 monitoring_results/
+http_load_test_results/
 release.sh
 release-tag.sh
 gpg-check.sh

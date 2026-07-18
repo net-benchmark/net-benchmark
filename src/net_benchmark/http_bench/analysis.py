@@ -22,6 +22,11 @@ class TargetStats:
       success_rate        ← success_rate
       min/max/avg/...     ← same latency stat fields, same formulas
       http2_rate          ← dnssec_validation_rate  (protocol quality signal)
+
+    This is also what net_benchmark.http_bench.load_test.LoadTestSummary
+    embeds for its overall and per-interval stats — one stats engine shared
+    by the regular `http benchmark` path and the `http load-test` path,
+    rather than two separate percentile implementations.
     """
 
     target: str
@@ -65,6 +70,22 @@ class TargetStats:
     cert_expiry_days_min: Optional[int] = None  # worst cert seen across requests
     alt_svc: Optional[str] = None
     ip_version: Optional[str] = None  # most common across requests
+
+    # --- 0.5.1 additions ---
+    # % of completed requests that reused an existing connection instead of
+    # opening a new one. Requires enable_connection_reuse=True on the
+    # engine; stays 0.0 otherwise.
+    connection_reuse_rate: float = 0.0
+    # % of completed requests whose TLS session ID had been seen before on
+    # this origin. Best-effort resumption signal, not a certainty — see
+    # TimingNetworkStream.start_tls in core.py.
+    tls_resumption_rate: float = 0.0
+    # Total HTTP/2 server pushes observed across all requests for this
+    # target. 0 if push detection was off or the h2 package is unavailable.
+    http2_push_total: int = 0
+    # Average multipart upload throughput (Mbps), across requests that
+    # actually uploaded (multipart_file_size > 0). 0.0 if none did.
+    avg_upload_throughput_mbps: float = 0.0
 
 
 class HTTPAnalyzer:
@@ -130,6 +151,17 @@ class HTTPAnalyzer:
                     "last_modified": r.last_modified or "",
                     "age": r.age or "",
                     "assertion_results": r.assertion_results,
+                    # --- 0.5.1 additions — previously collected on
+                    # HTTPResult but silently dropped here, so
+                    # get_target_statistics() had no way to surface them.
+                    "connection_reused": r.connection_reused,
+                    "connection_id": r.connection_id or "",
+                    "tls_resumed": r.tls_resumed,
+                    "tls_session_id": r.tls_session_id or "",
+                    "session_ticket": r.session_ticket,
+                    "http2_push_count": r.http2_push_count,
+                    "upload_throughput_mbps": r.upload_throughput_mbps,
+                    "websocket_handshake_ms": r.websocket_handshake_ms,
                 }
             )
         return pd.DataFrame(data)
@@ -261,6 +293,26 @@ class HTTPAnalyzer:
             ip_vals = td[td["ip_version"] != ""]["ip_version"]
             ip_version = str(ip_vals.mode().iloc[0]) if len(ip_vals) > 0 else None
 
+            # --- 0.5.1 additions ---
+            reused_count = int(td[td["completed"]]["connection_reused"].sum())
+            connection_reuse_rate = (
+                (reused_count / successful * 100) if successful > 0 else 0.0
+            )
+
+            resumed_count = int(td[td["completed"]]["tls_resumed"].sum())
+            tls_resumption_rate = (
+                (resumed_count / successful * 100) if successful > 0 else 0.0
+            )
+
+            http2_push_total = int(td["http2_push_count"].sum())
+
+            upload_vals = td[td["completed"] & td["upload_throughput_mbps"].notna()][
+                "upload_throughput_mbps"
+            ]
+            avg_upload_throughput_mbps = (
+                float(upload_vals.mean()) if len(upload_vals) > 0 else 0.0
+            )
+
             stats_list.append(
                 TargetStats(
                     target=target,
@@ -299,6 +351,10 @@ class HTTPAnalyzer:
                     cert_expiry_days_min=cert_min,
                     alt_svc=alt_svc,
                     ip_version=ip_version,
+                    connection_reuse_rate=connection_reuse_rate,
+                    tls_resumption_rate=tls_resumption_rate,
+                    http2_push_total=http2_push_total,
+                    avg_upload_throughput_mbps=avg_upload_throughput_mbps,
                 )
             )
 
@@ -344,6 +400,16 @@ class HTTPAnalyzer:
         )
         assertion_pass_rate = (assertion_pass_count / total * 100) if total > 0 else 0.0
 
+        # --- 0.5.1 additions ---
+        reused_count = int(self.df[self.df["completed"]]["connection_reused"].sum())
+        connection_reuse_rate = (
+            (reused_count / successful * 100) if successful > 0 else 0.0
+        )
+        resumed_count = int(self.df[self.df["completed"]]["tls_resumed"].sum())
+        tls_resumption_rate = (
+            (resumed_count / successful * 100) if successful > 0 else 0.0
+        )
+
         return {
             "total_requests": total,
             "successful_requests": successful,
@@ -360,6 +426,8 @@ class HTTPAnalyzer:
             ),
             "dns_resolver_ip": resolver_ip,
             "assertion_pass_rate": assertion_pass_rate,
+            "connection_reuse_rate": connection_reuse_rate,
+            "tls_resumption_rate": tls_resumption_rate,
         }
 
     def get_ttfb_statistics(self) -> List[Dict[str, Any]]:
