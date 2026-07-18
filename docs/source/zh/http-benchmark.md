@@ -12,6 +12,7 @@
 | `top` | 按速度排列所有目标 | `net-benchmark http top --limit 5` |
 | `compare` | 并排对比目标 | `net-benchmark http compare api.example.com api2.example.com` |
 | `monitoring` | 持续监控并告警 | `net-benchmark http monitoring --use-defaults` |
+| `load-test` | 持续负载测试，支持流量整形 | `net-benchmark http load-test -t https://api.example.com --mode throughput --duration 30` |
 
 ---
 
@@ -113,6 +114,44 @@ net-benchmark http monitoring \
 
 ---
 
+## load-test 命令
+
+```bash
+# 吞吐量模式——寻找端点天花板
+net-benchmark http load-test \
+  -t https://api.staging.example.com/health \
+  --mode throughput \
+  --duration 30 \
+  --max-concurrency 300 \
+  --formats csv,excel
+
+# 持续模式——验证固定 RPS 容量（--rps 必需）
+net-benchmark http load-test \
+  -t https://checkout.example.com/api/cart \
+  --mode sustained \
+  --rps 150 \
+  --duration 300 \
+  --formats csv,excel,json
+
+# 阶梯模式——逐步增压找出崩溃点
+net-benchmark http load-test \
+  -t https://api.example.com/search \
+  --mode ramp-up \
+  --start-concurrency 5 \
+  --ramp-concurrency 500 \
+  --ramp-duration 120 \
+  --hold-duration 60 \
+  --formats csv,excel,pdf
+
+# 对比多个目标（如 canary vs stable）
+net-benchmark http load-test \
+  -t https://api-v1.example.com,https://api-v2.example.com \
+  --mode sustained --rps 100 --duration 120 \
+  --formats excel --include-charts
+```
+
+---
+
 ## HTTP 汇总示例
 
 ```text
@@ -139,4 +178,5 @@ net-benchmark http benchmark --help
 net-benchmark http top --help
 net-benchmark http compare --help
 net-benchmark http monitoring --help
+net-benchmark http load-test --help
 ```
