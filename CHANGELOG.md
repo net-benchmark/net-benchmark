@@ -1,3 +1,14 @@
+## v0.5.1 (2026-07-18)
+
+### Feat
+
+- **http_bench**: add load test engine with throughput/sustained/ramp-up modes
+- **core**: add DoH endpoints for seven public resolvers
+
+### Fix
+
+- **docs**: remove jinja2 from autodoc_mock_imports
+
 ## v0.5.0 (2026-05-16)
 
 ### Feat
