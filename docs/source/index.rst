@@ -66,6 +66,7 @@ net-benchmark
    guides/http-security-auth
    guides/http-use-cases
    guides/http-exports
+   guides/http-load-test
 
 .. toctree::
    :maxdepth: 1

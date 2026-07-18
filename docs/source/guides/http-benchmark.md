@@ -34,6 +34,7 @@ Most tools measure only total latency. net-benchmark gives you the full picture.
 | `top` | Rank all targets by speed | `net-benchmark http top --limit 5` |
 | `compare` | Side-by-side target comparison | `net-benchmark http compare api.example.com api2.example.com` |
 | `monitoring` | Continuous monitoring with alerts | `net-benchmark http monitoring --use-defaults` |
+| `load-test` | Sustained load test with traffic shaping | `net-benchmark http load-test -t https://api.example.com --mode throughput --duration 30` |
 
 ---
 
@@ -194,6 +195,44 @@ net-benchmark http monitoring \
 
 ---
 
+## load-test
+
+Run sustained traffic with configurable load shaping. Three modes:
+
+- `throughput` – saturate the target (find the ceiling)
+- `sustained` – hold a fixed RPS (capacity validation)
+- `ramp-up` – gradually increase concurrency (find breaking point)
+
+```bash
+# Throughput – how fast can this endpoint go?
+net-benchmark http load-test \
+  -t https://api.staging.example.com/health \
+  --mode throughput \
+  --duration 30 \
+  --max-concurrency 300 \
+  --formats csv,excel
+
+# Sustained – validate a fixed RPS capacity (--rps required)
+net-benchmark http load-test \
+  -t https://checkout.example.com/api/cart \
+  --mode sustained \
+  --rps 150 \
+  --duration 300 \
+  --formats csv,excel,json
+
+# Ramp-up – find where things start to break
+net-benchmark http load-test \
+  -t https://api.example.com/search \
+  --mode ramp-up \
+  --start-concurrency 5 \
+  --ramp-concurrency 500 \
+  --ramp-duration 120 \
+  --hold-duration 60 \
+  --formats csv,excel,pdf
+```
+
+---
+
 ## Key features
 
 **Performance**
@@ -296,6 +335,7 @@ net-benchmark http benchmark --help
 net-benchmark http top --help
 net-benchmark http compare --help
 net-benchmark http monitoring --help
+net-benchmark http load-test --help
 ```
 
 Common scenarios:
