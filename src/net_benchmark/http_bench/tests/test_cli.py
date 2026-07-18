@@ -1,13 +1,24 @@
 """CLI integration tests for http benchmark commands."""
 
 import os
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from click.testing import CliRunner
 
+from net_benchmark.http_bench.analysis import TargetStats
 from net_benchmark.http_bench.cli import http
-from net_benchmark.http_bench.core import HTTPProtocol, HTTPResult, QueryStatus
+from net_benchmark.http_bench.core import (
+    HTTPProtocol,
+    HTTPResult,
+    QueryStatus,
+    TargetManager,
+)
+from net_benchmark.http_bench.load_test import (
+    ConnectionReuseStats,
+    LoadTestMode,
+    LoadTestSummary,
+)
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -76,6 +87,133 @@ def mock_run_benchmark(monkeypatch):
     monkeypatch.setattr(
         "net_benchmark.http_bench.cli.HTTPBenchmarkEngine.close",
         AsyncMock(),
+    )
+
+
+# Inside mock_load_test_components fixture
+@pytest.fixture
+def mock_load_test_components(monkeypatch):
+    # Patch engine classes in cli
+    monkeypatch.setattr("net_benchmark.http_bench.cli.HTTPBenchmarkEngine", MagicMock())
+    mock_engine_cls = MagicMock()
+    monkeypatch.setattr("net_benchmark.http_bench.cli.LoadTestEngine", mock_engine_cls)
+
+    # Patch exporter references directly in the cli module (where they are used)
+    monkeypatch.setattr("net_benchmark.http_bench.cli.LoadTestCSVExporter", MagicMock())
+    monkeypatch.setattr(
+        "net_benchmark.http_bench.cli.LoadTestExcelExporter", MagicMock()
+    )
+    monkeypatch.setattr("net_benchmark.http_bench.cli.LoadTestPDFExporter", MagicMock())
+    monkeypatch.setattr(
+        "net_benchmark.http_bench.cli.LoadTestExportBundle", MagicMock()
+    )
+
+    # Configure mock engine
+    def _engine_factory(target, http_engine=None):
+        engine = MagicMock()
+        engine.run_throughput = AsyncMock()
+        engine.run_sustained = AsyncMock()
+        engine.run_ramp_up = AsyncMock()
+        engine.close = AsyncMock()
+        engine.run_throughput.return_value = make_summary(target=target)
+        engine.run_sustained.return_value = make_summary(
+            target=target, mode=LoadTestMode.SUSTAINED, target_rps=100.0
+        )
+        engine.run_ramp_up.return_value = make_summary(
+            target=target, mode=LoadTestMode.RAMP_UP
+        )
+        return engine
+
+    mock_engine_cls.side_effect = _engine_factory
+    return mock_engine_cls
+
+
+# ---------------------------------------------------------------------------
+# Helpers for load test tests
+# ---------------------------------------------------------------------------
+
+
+def make_summary(
+    target="https://example.com",
+    mode=LoadTestMode.THROUGHPUT,
+    total_requests=100,
+    success_count=95,
+    achieved_rps=50.0,
+    target_rps=None,
+    connections_opened=3,
+) -> LoadTestSummary:
+    """Construct a minimal LoadTestSummary that matches the real engine output."""
+    stats = TargetStats(
+        target=target,
+        method="GET",
+        total_requests=total_requests,
+        successful_requests=success_count,
+        success_rate=(success_count / total_requests * 100) if total_requests else 0.0,
+        min_latency=5.0,
+        max_latency=200.0,
+        avg_latency=20.0,
+        median_latency=15.0,
+        std_latency=5.0,
+        p95_latency=100.0,
+        p99_latency=180.0,
+        jitter=2.0,
+        consistency_score=95.0,
+        avg_ttfb_ms=10.0,
+        p95_ttfb_ms=50.0,
+        http2_rate=80.0,
+        redirect_rate=10.0,
+        avg_response_size_bytes=2048.0,
+        avg_dns_ms=3.0,
+        avg_tcp_ms=5.0,
+        avg_tls_ms=12.0,
+        avg_compressed_size_bytes=1500.0,
+        avg_redirect_time_ms=0.0,
+        http2_downgrade_rate=0.0,
+        cache_control_present=50,
+        etag_present=40,
+        last_modified_present=30,
+        age_present=10,
+        hsts_present=80,
+        csp_present=60,
+        cdn_fingerprint="Cloudflare",
+        server_header="nginx",
+        cert_expiry_days_min=365,
+        alt_svc='h3=":443"',
+        ip_version="IPv4",
+        connection_reuse_rate=25.0,
+        tls_resumption_rate=40.0,
+        http2_push_total=0,
+        avg_upload_throughput_mbps=0.0,
+    )
+
+    reuse = ConnectionReuseStats(
+        total_requests=total_requests,
+        connections_opened=connections_opened,
+    )
+
+    status_dist = [
+        {
+            "status_code": 200,
+            "count": success_count,
+            "pct": round(success_count / total_requests * 100, 2),
+        },
+        {
+            "status_code": 500,
+            "count": total_requests - success_count,
+            "pct": round((total_requests - success_count) / total_requests * 100, 2),
+        },
+    ]
+
+    return LoadTestSummary(
+        mode=mode,
+        target=target,
+        duration_s=2.0,
+        target_rps=target_rps,
+        stats=stats,
+        status_code_distribution=status_dist,
+        connection_reuse=reuse,
+        intervals=[],
+        results=[],
     )
 
 
@@ -908,3 +1046,224 @@ class TestCompare:
         result = runner.invoke(http, ["compare", "a.com", "b.com", "--iterations", "1"])
         assert result.exit_code == 1
         assert "Error during comparison: test error" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Load test command tests (0.5.1)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadTest:
+    def test_missing_targets(self, runner):
+        result = runner.invoke(http, ["load-test"])
+        assert result.exit_code == 0
+        assert "Provide --targets or use --use-defaults" in result.output
+
+    def test_invalid_format(self, runner):
+        result = runner.invoke(
+            http, ["load-test", "--use-defaults", "--formats", "xml"]
+        )
+        assert result.exit_code == 0
+        assert "Invalid format 'xml'" in result.output
+
+    def test_file_not_found(self, runner):
+        result = runner.invoke(http, ["load-test", "--targets", "nonexistent.txt"])
+        assert result.exit_code == 0
+        assert "Target file not found" in result.output
+
+    def test_sustained_missing_rps(self, runner):
+        result = runner.invoke(
+            http,
+            [
+                "load-test",
+                "--use-defaults",
+                "--mode",
+                "sustained",
+                "--duration",
+                "5",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "--mode sustained requires --rps" in result.output
+
+    def test_throughput_mode_exports(self, runner, mock_load_test_components):
+        result = runner.invoke(
+            http,
+            [
+                "load-test",
+                "--targets",
+                "https://example.com",
+                "--mode",
+                "throughput",
+                "--duration",
+                "2",
+                "--formats",
+                "csv,excel,json",
+                "--quiet",
+            ],
+        )
+        assert result.exit_code == 0
+
+        # Import the mocked exporters from cli
+        from net_benchmark.http_bench.cli import (
+            LoadTestCSVExporter,
+            LoadTestExcelExporter,
+            LoadTestExportBundle,
+            LoadTestPDFExporter,
+        )
+
+        LoadTestCSVExporter.export_raw_results.assert_called_once()
+        LoadTestCSVExporter.export_summary.assert_called_once()
+        LoadTestCSVExporter.export_intervals.assert_called_once()
+        LoadTestCSVExporter.export_error_breakdown.assert_called_once()
+        LoadTestExcelExporter.export_results.assert_called_once()
+        LoadTestExportBundle.export_json.assert_called_once()
+        LoadTestPDFExporter.export_results.assert_not_called()
+
+    def test_sustained_mode_summary_output(self, runner, mock_load_test_components):
+        result = runner.invoke(
+            http,
+            [
+                "load-test",
+                "--targets",
+                "https://example.com",
+                "--mode",
+                "sustained",
+                "--rps",
+                "100",
+                "--duration",
+                "2",
+                "--enable-connection-reuse",
+                "--formats",
+                "csv",
+            ],
+        )
+        assert result.exit_code == 0
+        output = result.output
+        assert "Mode:             sustained" in output
+        assert "Target RPS:       100.0" in output
+        assert "Achieved RPS:" in output
+        assert "Connections open:" in output
+        assert "Reuse rate:" in output
+        assert "TLS resumption:" not in output
+
+    def test_ramp_up_mode_config_output(self, runner, mock_load_test_components):
+        result = runner.invoke(
+            http,
+            [
+                "load-test",
+                "--targets",
+                "https://example.com",
+                "--mode",
+                "ramp-up",
+                "--start-concurrency",
+                "5",
+                "--ramp-concurrency",
+                "50",
+                "--ramp-duration",
+                "10",
+                "--hold-duration",
+                "5",
+                "--formats",
+                "csv",
+            ],
+        )
+        assert result.exit_code == 0
+        output = result.output
+        assert "Concurrency:  5 -> 50" in output
+        assert "Ramp:         10.0s, hold 5.0s" in output
+
+    def test_feature_flags_config_message(self, runner, mock_load_test_components):
+        result = runner.invoke(
+            http,
+            [
+                "load-test",
+                "--use-defaults",
+                "--mode",
+                "throughput",
+                "--enable-connection-reuse",
+                "--enable-tls-resumption",
+                "--enable-push-detection",
+                "--formats",
+                "csv",
+            ],
+        )
+        assert result.exit_code == 0
+        output = result.output
+        assert "Connection reuse tracking: on" in output
+        assert "TLS resumption detection:  on" in output
+        assert "HTTP/2 push detection:     on" in output
+
+    def test_multiple_targets_create_separate_engines(
+        self, runner, mock_load_test_components
+    ):
+        mock_cls = mock_load_test_components
+        mock_cls.reset_mock()
+
+        runner.invoke(
+            http,
+            [
+                "load-test",
+                "--targets",
+                "https://a.com,https://b.com",
+                "--mode",
+                "throughput",
+                "--duration",
+                "2",
+                "--formats",
+                "csv",
+                "--quiet",
+            ],
+        )
+        assert mock_cls.call_count == 2
+        calls = [c.args[0] for c in mock_cls.call_args_list]
+        assert "https://a.com" in calls
+        assert "https://b.com" in calls
+
+    def test_use_defaults_targets(self, runner, mock_load_test_components):
+        mock_cls = mock_load_test_components
+        mock_cls.reset_mock()
+
+        runner.invoke(
+            http,
+            [
+                "load-test",
+                "--use-defaults",
+                "--mode",
+                "throughput",
+                "--duration",
+                "2",
+                "--formats",
+                "csv",
+                "--quiet",
+            ],
+        )
+        expected = TargetManager.get_default_targets()
+        assert mock_cls.call_count == len(expected)
+        seen = [c.args[0] for c in mock_cls.call_args_list]
+        for t in expected:
+            assert t in seen
+
+    def test_output_directory_creation(
+        self, runner, mock_load_test_components, tmp_path
+    ):
+        out = tmp_path / "results"
+        runner.invoke(
+            http,
+            [
+                "load-test",
+                "--targets",
+                "https://example.com",
+                "--output",
+                str(out),
+                "--formats",
+                "csv",
+                "--quiet",
+            ],
+        )
+        assert out.exists()
+        # Since exporters are mocked, no real files are written.
+        # Verify that the exporter methods were called instead.
+        from net_benchmark.http_bench.cli import LoadTestCSVExporter
+
+        LoadTestCSVExporter.export_raw_results.assert_called_once()

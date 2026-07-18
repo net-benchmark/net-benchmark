@@ -1,7 +1,10 @@
 """Core HTTP benchmarking functionality."""
 
 import asyncio
+import hashlib
 import ipaddress
+import os
+import re
 import ssl
 import time
 import uuid
@@ -10,7 +13,19 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+    cast,
+)
 from urllib.parse import urlparse
 
 import httpcore
@@ -24,6 +39,22 @@ from httpcore._backends.base import (
     AsyncNetworkStream,
 )
 
+# WebSocket dependency (optional)
+try:
+    import aiohttp
+
+    _AIOHTTP_AVAILABLE = True
+except ImportError:
+    _AIOHTTP_AVAILABLE = False
+
+try:
+    import h2.connection
+    import h2.events
+
+    _H2_AVAILABLE = True
+except ImportError:
+    _H2_AVAILABLE = False
+
 from net_benchmark.dns_benchmark.core import QueryStatus
 from net_benchmark.utils.messages import warning
 
@@ -33,15 +64,28 @@ from net_benchmark.utils.messages import warning
 
 
 class TimingNetworkStream(AsyncNetworkStream):
-    """Wraps an AsyncNetworkStream to capture TCP-connect and TLS-handshake times.
+    """Wraps an AsyncNetworkStream to capture TCP-connect and TLS-handshake
+    times for exactly *this* connection.
 
-    The metrics dict is shared with TimingNetworkBackend so writes made inside
-    start_tls() are immediately visible there without any extra plumbing.
+    # Each TimingNetworkStream owns its own `metrics` dict
+    (created fresh in TimingNetworkBackend.connect_tcp — never shared/mutated
+    by other connections). Callers that need this specific connection's
+    metrics should retrieve this stream instance (e.g. via
+    httpx.Response.extensions["network_stream"]) and call get_metrics(),
+    rather than reading TimingNetworkBackend.metrics, which only reflects
+    whichever connection was opened *most recently* on this backend and is
+    unsafe to read under concurrency (see MetricsCapturingTransport docs).
     """
 
-    def __init__(self, stream: AsyncNetworkStream, metrics: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        stream: AsyncNetworkStream,
+        metrics: Dict[str, Any],
+        session_registry: Optional[Set[bytes]] = None,
+    ) -> None:
         self._stream = stream
-        self._metrics = metrics  # shared reference — intentional
+        self._metrics = metrics  # per-connection — intentional
+        self._session_registry = session_registry
 
     async def read(self, max_bytes: int, timeout: Optional[float] = None) -> bytes:
         return await self._stream.read(max_bytes, timeout)
@@ -61,30 +105,94 @@ class TimingNetworkStream(AsyncNetworkStream):
         tls_start = time.perf_counter()
         tls_stream = await self._stream.start_tls(ssl_context, server_hostname, timeout)
         self._metrics["tls_handshake_ms"] = (time.perf_counter() - tls_start) * 1000
+
+        # TLS certificate capture + best-effort resumption detection.
         try:
             ssl_obj = tls_stream.get_extra_info("ssl_object")
             if ssl_obj is not None:
                 self._metrics["cert_der"] = ssl_obj.getpeercert(binary_form=True)
+
+                # Session ticket presence
+                session = getattr(ssl_obj, "session", None)
+                session_id: Optional[bytes] = None
+                if session is not None:
+                    session_id = session.id
+                    self._metrics["tls_session_id"] = (
+                        session_id.hex() if session_id else None
+                    )
+
+                    ticket_hint = getattr(session, "ticket_lifetime_hint", None)
+                    self._metrics["session_ticket"] = (
+                        ticket_hint is not None and ticket_hint > 0
+                    )
+                else:
+                    self._metrics["tls_session_id"] = None
+                    self._metrics["session_ticket"] = False
+
+                # Resumption detection. Python's stdlib
+                # ssl.SSLSession has no reliable "was this handshake resumed"
+                # flag (there is no cross-version `session.reused` attribute —
+                # a previous version of this code assumed one existed; it did
+                # not, and always evaluated to False). The best signal
+                # available without raw packet inspection is whether the same
+                # TLS session ID has been seen before on a *new* TCP
+                # connection to this origin. This is a best-effort heuristic,
+                # not a certainty (session tickets in TLS 1.3 can rotate IDs
+                # even on a resumed handshake) — treat tls_resumed accordingly.
+                if session_id and self._session_registry is not None:
+                    self._metrics["tls_resumed"] = session_id in self._session_registry
+                    self._session_registry.add(session_id)
+                else:
+                    self._metrics["tls_resumed"] = False
         except Exception:
-            pass
-        # Wrap the TLS stream so further calls keep the same metrics reference
-        return TimingNetworkStream(tls_stream, self._metrics)
+            self._metrics["tls_resumed"] = False
+            self._metrics["session_ticket"] = False
+
+        # Wrap the TLS stream so further calls keep the same per-connection
+        # metrics dict and session registry reference.
+        return TimingNetworkStream(tls_stream, self._metrics, self._session_registry)
 
     def get_extra_info(self, info: str) -> Any:
         return self._stream.get_extra_info(info)
 
+    # Safe per-connection accessor (see class docstring)
+    def get_metrics(self) -> Dict[str, Any]:
+        """This connection's own metrics dict — safe to read even when other
+        connections are concurrently in flight on the same backend.
+        """
+        return self._metrics
+
 
 class TimingNetworkBackend(AsyncNetworkBackend):
-    """Wraps AutoBackend to inject per-connection TCP and TLS timing.
+    """
+    Wraps AutoBackend to inject per-connection TCP and TLS timing.
 
-    One backend instance per origin so metrics are not clobbered across origins.
+    One backend instance per origin. `self.metrics` reflects only the most
+    recently *opened* connection and is kept for backward compatibility with
+    MetricsCapturingTransport.get_connection_metrics() (used as a fallback
+    when the per-request stream isn't retrievable) — callers that need
+    correct per-request attribution under concurrency should prefer the
+    per-stream metrics via TimingNetworkStream.get_metrics().
     """
 
     def __init__(self, local_address: Optional[str] = None) -> None:
         self._backend = AutoBackend()
         self.local_address = local_address
-        # Overwritten on every new connection — safe: asyncio is single-threaded.
         self.metrics: Dict[str, Any] = {}
+        # Cumulative — NOT reset per-connection. Used for
+        # connection-reuse rate calculation (load_test.py) via
+        # connections_opened vs total requests served.
+        self.connections_opened: int = 0
+        # Metrics keyed by connection_id, so callers with no
+        # response object (e.g. get_connection_stats) can ask for a specific
+        # connection's metrics instead of "whatever opened most recently".
+        self.metrics_by_id: Dict[str, Dict[str, Any]] = {}
+        # TLS session IDs seen on this origin, across all
+        # connections for this backend's lifetime — used for best-effort
+        # resumption detection. Shared by reference into every
+        # TimingNetworkStream this backend creates (safe: asyncio is
+        # single-threaded).
+        self.seen_tls_session_ids: Set[bytes] = set()
 
     async def connect_tcp(
         self,
@@ -94,7 +202,6 @@ class TimingNetworkBackend(AsyncNetworkBackend):
         local_address: Optional[str] = None,
         socket_options: Optional[Iterable[SOCKET_OPTION]] = None,
     ) -> AsyncNetworkStream:
-
         if local_address is None:
             local_address = self.local_address
 
@@ -106,21 +213,39 @@ class TimingNetworkBackend(AsyncNetworkBackend):
             local_address=local_address,
             socket_options=socket_options,
         )
-        self.metrics = {
+        self.connections_opened += 1
+        # A fresh dict per connection (not a mutated shared
+        # one) — this object, not self.metrics, is what TimingNetworkStream
+        # writes into and what request_single should read back for this
+        # specific connection (see _get_connection_metrics_for_response).
+        conn_metrics: Dict[str, Any] = {
             "tcp_connect_ms": (time.perf_counter() - tcp_start) * 1000,
             "tls_handshake_ms": None,
             "cert_der": None,
             "ip_version": None,
+            "connection_id": f"conn-{self.connections_opened}",
+            # TCP Fast Open cannot be reliably detected from
+            # Python's socket/ssl stack without raw packet inspection (there
+            # is no portable "was TFO actually used on this handshake" signal
+            # — ssl.TCP_FASTOPEN only indicates platform *support* for the
+            # socket option, not that this connection used it). Rather than
+            # report a fabricated guess, this is left as None (unknown).
+            "tcp_fast_open": None,
         }
+
         try:
             server_addr = stream.get_extra_info("server_addr")
             if isinstance(server_addr, tuple) and server_addr:
-                self.metrics["ip_version"] = (
+                conn_metrics["ip_version"] = (
                     f"IPv{ipaddress.ip_address(server_addr[0]).version}"
                 )
         except Exception:
             pass
-        return TimingNetworkStream(stream, self.metrics)
+
+        self.metrics = conn_metrics  # last-connection snapshot (fallback path)
+        # --- 0.5.1: fix — also index by connection_id for safe lookup
+        self.metrics_by_id[conn_metrics["connection_id"]] = conn_metrics
+        return TimingNetworkStream(stream, conn_metrics, self.seen_tls_session_ids)
 
     async def connect_unix_socket(
         self,
@@ -137,16 +262,84 @@ class TimingNetworkBackend(AsyncNetworkBackend):
 
 
 # ---------------------------------------------------------------------------
+# HTTP/2 push detection pool — best-effort, optional dependency.
+# ---------------------------------------------------------------------------
+if _H2_AVAILABLE:
+
+    class PushTrackingH2Connection(h2.connection.H2Connection):
+        """An H2 connection that records promised stream headers."""
+
+        def __init__(self, config: Any = None) -> None:
+            super().__init__(config)
+            self.push_promises: List[Dict[str, Any]] = []
+
+        def receive_data(self, data: bytes) -> List["h2.events.Event"]:
+            events = super().receive_data(data)
+            for event in events:
+                if isinstance(event, h2.events.PushedStreamReceived):
+                    headers: Dict[bytes, bytes] = {
+                        bytes(k): bytes(v) for k, v in (event.headers or [])
+                    }
+                    path = headers.get(b":path", b"").decode()
+                    scheme = headers.get(b":scheme", b"https").decode()
+                    authority = headers.get(b":authority", b"").decode()
+                    url = (
+                        f"{scheme}://{authority}{path}" if authority and path else path
+                    )
+                    self.push_promises.append(
+                        {
+                            "stream_id": event.parent_stream_id,
+                            "promised_stream_id": event.pushed_stream_id,
+                            "url": url,
+                        }
+                    )
+            return events
+
+    class PushDetectingPool(httpcore.AsyncConnectionPool):
+        """AsyncConnectionPool that injects push-tracking H2 connections.
+
+        This relies on httpcore private internals (_init_connection,
+        _h2_connection) that are not part of httpcore's public API and are
+        not guaranteed stable across versions. If either is missing or
+        raises, push detection silently degrades to "no pushes recorded"
+        rather than crashing the request — see _init_connection below.
+        """
+
+        async def _init_connection(self, url: Any, ssl_context: ssl.SSLContext) -> Any:
+            conn = await super()._init_connection(url, ssl_context)  # type: ignore[misc]
+            try:
+                http_conn = conn.connection
+                if hasattr(http_conn, "_h2_connection"):
+                    config = http_conn._h2_connection.config
+                    http_conn._h2_connection = PushTrackingH2Connection(config)
+            except Exception:
+                # Private-API shape changed underneath us — degrade
+                # gracefully rather than break the whole request.
+                pass
+            return conn
+
+else:
+    PushTrackingH2Connection = None  # type: ignore[assignment,misc]
+    PushDetectingPool = None  # type: ignore[assignment,misc]
+
+
+# ---------------------------------------------------------------------------
 # Transport — build httpcore pool directly to avoid overriding _init_pool
 # ---------------------------------------------------------------------------
 
 
 class MetricsCapturingTransport(httpx.AsyncHTTPTransport):
-    """AsyncHTTPTransport that captures per-connection timing and TLS metrics.
+    """AsyncHTTPTransport that captures per-connection timing, TLS metrics,
+    connection reuse info, and (best-effort) HTTP/2 pushes.
 
-    Rather than overriding the non-existent _init_pool hook, we build the
-    httpcore.AsyncConnectionPool ourselves and pass the custom TimingNetworkBackend
-    directly.
+    # get_connection_metrics() returns only the
+    most-recently-opened connection's metrics for this transport and is
+    unsafe to rely on when multiple requests to the same origin are in
+    flight concurrently — it exists as a fallback for callers that can't
+    retrieve the per-request stream (e.g. sequential/single-concurrency use,
+    or older code). Prefer reading
+    httpx.Response.extensions["network_stream"].get_metrics() when
+    available; request_single() below does this automatically.
     """
 
     def __init__(
@@ -158,6 +351,7 @@ class MetricsCapturingTransport(httpx.AsyncHTTPTransport):
         mtls_cert: Optional[str] = None,
         mtls_key: Optional[str] = None,
         local_address: Optional[str] = None,
+        enable_push_detection: bool = False,
     ) -> None:
         # Build SSL context manually so we control mTLS and verification.
         ssl_context = ssl.create_default_context()
@@ -172,17 +366,63 @@ class MetricsCapturingTransport(httpx.AsyncHTTPTransport):
         self._timing_backend = TimingNetworkBackend(local_address=local_address)
         self._sni_hostname = sni_hostname
 
-        # Inject our backend directly into httpcore's pool.  httpx's
-        # handle_async_request delegates to self._pool, so this is sufficient.
-        self._pool = httpcore.AsyncConnectionPool(
+        # Push detection needs both the h2 package and
+        # PushDetectingPool's httpcore-internals hook to be usable. If either
+        # is unavailable, fall back to the plain pool rather than raising —
+        # the caller asked for a benchmark, not for h2 to be a hard dependency.
+        use_push_pool = (
+            enable_push_detection and _H2_AVAILABLE and PushDetectingPool is not None
+        )
+        self._enable_push_detection = use_push_pool
+
+        pool_cls = PushDetectingPool if use_push_pool else httpcore.AsyncConnectionPool
+        self._pool: httpcore.AsyncConnectionPool = pool_cls(
             ssl_context=ssl_context,
             http2=http2,
             network_backend=self._timing_backend,
         )
 
-    def get_connection_metrics(self) -> Dict[str, Any]:
-        """Return a snapshot of metrics from the most recently established connection."""
+    def get_connection_metrics(
+        self, connection_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Pass connection_id to get that specific
+        connection's metrics safely, even under concurrency (looked up from
+        TimingNetworkBackend.metrics_by_id, unaffected by other connections
+        opening/closing). Without connection_id, falls back to the old
+        "most recently opened" snapshot — still unsafe under concurrency,
+        kept only for callers with no id to give (e.g. a totally fresh
+        transport with zero requests sent).
+        """
+        if connection_id is not None:
+            return dict(self._timing_backend.metrics_by_id.get(connection_id, {}))
         return dict(self._timing_backend.metrics)
+
+    # Connection-reuse rate calculation
+    def get_connections_opened(self) -> int:
+        """Cumulative count of new TCP connections opened by this transport's pool."""
+        return self._timing_backend.connections_opened
+
+    # HTTP/2 push detection
+    def get_recent_push_promises(self) -> List[Dict[str, Any]]:
+        """Return any HTTP/2 push promises recorded by the push-detecting
+        pool. Empty list if push detection is unavailable/disabled, or if
+        the httpcore internals it depends on aren't present in this
+        version — never raises for that reason. Only AttributeError is
+        swallowed here (private-API shape drift); anything else propagates
+        so real bugs in this loop aren't hidden alongside "h2 unavailable".
+        """
+        if not self._enable_push_detection:
+            return []
+        try:
+            for conn in self._pool.connections:
+                http_conn = conn.connection  # type: ignore[attr-defined]
+                if hasattr(http_conn, "_h2_connection") and isinstance(
+                    http_conn._h2_connection, PushTrackingH2Connection
+                ):
+                    return http_conn._h2_connection.push_promises
+        except AttributeError:
+            pass
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +544,112 @@ CDN_VALUE_PATTERNS: Dict[str, Dict[str, str]] = {
 }
 
 
+class HTTPDigestAuth(httpx.Auth):
+    """httpx-native Digest authentication (MD5 or SHA-256, qop=auth).
+
+    Replaces a previous version that borrowed
+    requests.auth.HTTPDigestAuth outside its intended Session.send() retry
+    flow (it never actually computed a digest response from the real
+    WWW-Authenticate challenge). This parses the real 401 and computes
+    HA1/HA2/response directly, no `requests` dependency.
+    """
+
+    _CHALLENGE_RE = re.compile(r'(\w+)=(?:"([^"]*)"|([^,\s]*))')
+
+    def __init__(self, username: str, password: str) -> None:
+        self.username = username
+        self.password = password
+        self._nonce_count = 0
+
+    def auth_flow(
+        self, request: httpx.Request
+    ) -> Generator[httpx.Request, httpx.Response, None]:
+        response = yield request
+        if response.status_code != 401:
+            return
+
+        www_auth = response.headers.get("www-authenticate", "")
+        if not www_auth.lower().startswith("digest"):
+            return
+
+        challenge = self._parse_challenge(www_auth)
+        if not challenge.get("nonce"):
+            return
+
+        auth_header = self._build_header(request, challenge)
+        if auth_header:
+            request.headers["Authorization"] = auth_header
+            yield request
+
+    @classmethod
+    def _parse_challenge(cls, header_value: str) -> Dict[str, str]:
+        body = (
+            header_value[len("Digest ") :]
+            if header_value.lower().startswith("digest ")
+            else header_value
+        )
+        params: Dict[str, str] = {}
+        for match in cls._CHALLENGE_RE.finditer(body):
+            key = match.group(1)
+            value = match.group(2) if match.group(2) is not None else match.group(3)
+            params[key] = (value or "").strip()
+        return params
+
+    def _build_header(
+        self, request: httpx.Request, challenge: Dict[str, str]
+    ) -> Optional[str]:
+        realm = challenge.get("realm", "")
+        nonce = challenge.get("nonce", "")
+        opaque = challenge.get("opaque")
+        qop_offered = challenge.get("qop", "")
+        use_qop = (
+            "auth" in [q.strip() for q in qop_offered.split(",")]
+            if qop_offered
+            else False
+        )
+        algorithm = challenge.get("algorithm", "MD5").upper()
+        hash_func = hashlib.sha256 if algorithm.startswith("SHA-256") else hashlib.md5
+
+        def h(data: str) -> str:
+            return hash_func(data.encode("utf-8")).hexdigest()
+
+        uri = (
+            request.url.raw_path.decode()
+            if hasattr(request.url, "raw_path")
+            else str(request.url)
+        )
+        method = request.method
+
+        ha1 = h(f"{self.username}:{realm}:{self.password}")
+        ha2 = h(f"{method}:{uri}")
+
+        header_parts = [
+            f'username="{self.username}"',
+            f'realm="{realm}"',
+            f'nonce="{nonce}"',
+            f'uri="{uri}"',
+            f"algorithm={algorithm}",
+        ]
+
+        if use_qop:
+            self._nonce_count += 1
+            nc = f"{self._nonce_count:08x}"
+            cnonce = uuid.uuid4().hex[:16]
+            response_digest = h(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}")
+            header_parts.append(f'response="{response_digest}"')
+            header_parts.append("qop=auth")
+            header_parts.append(f"nc={nc}")
+            header_parts.append(f'cnonce="{cnonce}"')
+        else:
+            response_digest = h(f"{ha1}:{nonce}:{ha2}")
+            header_parts.append(f'response="{response_digest}"')
+
+        if opaque:
+            header_parts.append(f'opaque="{opaque}"')
+
+        return "Digest " + ", ".join(header_parts)
+
+
 @dataclass
 class HTTPResult:
     """Result of a single HTTP request"""
@@ -365,6 +711,28 @@ class HTTPResult:
     request_id: Optional[str] = None
     # assertions
     assertion_results: Dict[str, bool] = field(default_factory=dict)
+
+    # --- 0.5.1 fields ---
+    connection_id: Optional[str] = None
+    connection_reused: bool = False
+    # Always None: Python's socket/ssl stack cannot reliably confirm TFO
+    # usage without raw packet inspection. Kept as a field (rather than
+    # removed) so downstream code/exporters don't break; see
+    # TimingNetworkBackend.connect_tcp for the full explanation.
+    tcp_fast_open: Optional[bool] = None
+    # Best-effort: same TLS session ID seen on a prior connection to this
+    # origin. Not a certainty — see TimingNetworkStream.start_tls.
+    tls_resumed: bool = False
+    tls_session_id: Optional[str] = None
+    session_ticket: bool = False
+    # Best-effort: depends on httpcore private internals; empty if the h2
+    # package isn't installed or those internals are unavailable.
+    http2_push_count: int = 0
+    http2_pushes: List[str] = field(default_factory=list)
+    upload_size_bytes: Optional[int] = None
+    upload_time_ms: Optional[float] = None
+    upload_throughput_mbps: Optional[float] = None
+    websocket_handshake_ms: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -484,6 +852,14 @@ class HTTPBenchmarkEngine:
         query_params: Optional[Dict[str, str]] = None,
         body: Optional[bytes] = None,
         local_address: Optional[str] = None,
+        # --- 0.5.1: new feature toggles (all default False/off — zero
+        # behavior change for existing callers unless explicitly opted in)
+        use_cookie_jar: bool = False,
+        enable_push_detection: bool = False,
+        enable_connection_reuse: bool = False,
+        enable_tfo_detection: bool = False,
+        enable_tls_resumption: bool = False,
+        enable_session_ticket: bool = False,
     ) -> None:
         self.max_concurrent = max_concurrent
         self.max_retries = max_retries
@@ -514,6 +890,19 @@ class HTTPBenchmarkEngine:
         self._transports: Dict[str, MetricsCapturingTransport] = {}
         self._dns_cache: Dict[str, Tuple[float, str]] = {}
         self.dns_resolver_ip = self._detect_dns_resolver()
+
+        # --- 0.5.1: feature toggle storage
+        self.use_cookie_jar = use_cookie_jar
+        self.enable_push_detection = enable_push_detection
+        self.enable_connection_reuse = enable_connection_reuse
+        self.enable_tfo_detection = enable_tfo_detection
+        self.enable_tls_resumption = enable_tls_resumption
+        self.enable_session_ticket = enable_session_ticket
+
+        # --- 0.5.1: fix — origin -> set of connection_ids already seen
+        # (must be a set, not a single last-id string, since with
+        # concurrency the "most recent" id is not well-defined).
+        self._last_connection_id: Dict[str, Set[str]] = {}
 
         # Build timeout object — may be a plain float or an httpx.Timeout
         if connect_timeout or read_timeout or write_timeout:
@@ -564,6 +953,7 @@ class HTTPBenchmarkEngine:
                 mtls_cert=self.mtls_cert,
                 mtls_key=self.mtls_key,
                 local_address=self.local_address,
+                enable_push_detection=self.enable_push_detection,
             )
         return self._transports[origin]
 
@@ -575,6 +965,9 @@ class HTTPBenchmarkEngine:
 
         if origin not in self._clients:
             transport = self._get_transport(url)
+            client_cookies: Union[Dict[str, str], httpx.Cookies] = self.cookies
+            if self.use_cookie_jar and not isinstance(client_cookies, httpx.Cookies):
+                client_cookies = httpx.Cookies()
             client_kwargs: Dict[str, Any] = dict(
                 transport=transport,
                 http2=self.http2,
@@ -582,7 +975,7 @@ class HTTPBenchmarkEngine:
                 follow_redirects=self.follow_redirects,
                 timeout=httpx.Timeout(self._timeout),
                 headers=self.extra_headers,
-                cookies=self.cookies or None,
+                cookies=client_cookies if client_cookies else None,
             )
             if self.auth:
                 client_kwargs["auth"] = self.auth
@@ -603,6 +996,22 @@ class HTTPBenchmarkEngine:
     def get_failed_targets(self) -> Dict[str, int]:
         return dict(self.failed_targets)
 
+    # Used by load_test.py for connection-reuse rate calculation
+    def get_connection_stats(
+        self, target: str, connection_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Pass connection_id (from HTTPResult.connection_id, requires
+        enable_connection_reuse=True) to safely inspect one specific
+        connection's metrics. Without it, "latest_metrics" is a best-effort
+        snapshot only reliable when no concurrent requests are in flight.
+        """
+        transport = self._get_transport(target)
+        return {
+            "connections_opened": transport.get_connections_opened(),
+            "latest_metrics": transport.get_connection_metrics(connection_id),
+        }
+
     def _run_assertions(self, response: httpx.Response, body: bytes) -> Dict[str, bool]:
         results: Dict[str, bool] = {}
         for name, config in self.assertions.items():
@@ -610,6 +1019,10 @@ class HTTPBenchmarkEngine:
                 results[name] = response.status_code == config
             elif name == "body_contains":
                 results[name] = config in body.decode("utf-8", errors="ignore")
+            elif name == "body_regex":
+                results[name] = bool(
+                    re.search(config, body.decode("utf-8", errors="ignore"))
+                )
             elif name == "header_exists":
                 results[name] = config in response.headers
             elif name == "header_value":
@@ -686,6 +1099,27 @@ class HTTPBenchmarkEngine:
             return HTTPProtocol.HTTP1, "http/1.1"
         return HTTPProtocol.UNKNOWN, None
 
+    @staticmethod
+    def _get_connection_metrics_for_response(
+        response: httpx.Response, transport: MetricsCapturingTransport
+    ) -> Dict[str, Any]:
+        """
+        Prefer the metrics dict belonging
+        to the exact connection this response came from — httpcore attaches
+        the AsyncNetworkStream it used as the "network_stream" extension, and
+        httpx forwards extensions through. Falls back to the transport-level
+        (possibly stale under concurrency) snapshot if the extension isn't
+        present, so this never raises and still works on older
+        httpx/httpcore that may not expose it.
+        """
+        try:
+            network_stream = response.extensions.get("network_stream")
+            if network_stream is not None and hasattr(network_stream, "get_metrics"):
+                return cast(Dict[str, Any], network_stream.get_metrics())
+        except Exception:
+            pass
+        return transport.get_connection_metrics()
+
     # ------------------------------------------------------------------
     # Single request
     # ------------------------------------------------------------------
@@ -694,6 +1128,7 @@ class HTTPBenchmarkEngine:
         self,
         target: str,
         iteration: int = 1,
+        multipart_file_size: int = 0,  # --- 0.5.1: item 12, upload throughput
     ) -> HTTPResult:
         """Execute a single HTTP request with retry logic."""
         await self._ensure_async_primitives()
@@ -701,6 +1136,7 @@ class HTTPBenchmarkEngine:
 
         start_time = time.time()
         client, transport = await self._get_client(target)
+        origin = self._origin(target)
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -733,11 +1169,36 @@ class HTTPBenchmarkEngine:
                         request_id = uuid.uuid4().hex[:8]
                         req_headers["X-Request-ID"] = request_id
 
+                    content_to_send = self.body
+                    upload_start = None
+                    upload_time_ms: Optional[float] = None
+                    upload_size_bytes: Optional[int] = None
+
+                    # --- 0.5.1: item 12 — multipart upload throughput
+                    if multipart_file_size > 0:
+                        random_data = os.urandom(multipart_file_size)
+                        boundary = uuid.uuid4().hex
+                        multipart_body = (
+                            (
+                                f"--{boundary}\r\n"
+                                'Content-Disposition: form-data; name="file"; filename="random.bin"\r\n'
+                                "Content-Type: application/octet-stream\r\n\r\n"
+                            ).encode()
+                            + random_data
+                            + f"\r\n--{boundary}--\r\n".encode()
+                        )
+                        content_to_send = multipart_body
+                        upload_size_bytes = len(content_to_send)
+                        req_headers["Content-Type"] = (
+                            f"multipart/form-data; boundary={boundary}"
+                        )
+                        upload_start = time.perf_counter()
+
                     async with client.stream(
                         method=self.method,
                         url=target,
                         headers=req_headers,
-                        content=self.body,
+                        content=content_to_send,
                     ) as response:
                         headers_received = time.perf_counter()
                         ttfb_ms = (headers_received - start_time) * 1000
@@ -746,6 +1207,16 @@ class HTTPBenchmarkEngine:
 
                     end_time = time.perf_counter()
                     total_ms = (end_time - start_time) * 1000
+
+                    if upload_start is not None and upload_size_bytes is not None:
+                        upload_time_ms = (end_time - upload_start) * 1000
+                        upload_throughput_mbps = (
+                            (upload_size_bytes * 8) / (upload_time_ms * 1000)
+                            if upload_time_ms > 0
+                            else 0.0
+                        )
+                    else:
+                        upload_throughput_mbps = None
 
                     # Check max_latency assertion if defined
                     if "max_latency" in self.assertions:
@@ -843,10 +1314,17 @@ class HTTPBenchmarkEngine:
                         http2_expected=http2_expected,
                         http2_downgraded=http2_downgraded,
                         query_params=self.query_params,
+                        upload_size_bytes=upload_size_bytes,
+                        upload_time_ms=upload_time_ms,
+                        upload_throughput_mbps=upload_throughput_mbps,
                     )
 
-                    # Populate connection-level metrics from the timing backend
-                    metrics = transport.get_connection_metrics()
+                    # --- 0.5.1: fix #1 — read metrics for the exact
+                    # connection this response used, not the backend's
+                    # last-write snapshot.
+                    metrics = self._get_connection_metrics_for_response(
+                        response, transport
+                    )
                     result.tcp_connect_ms = metrics.get("tcp_connect_ms")
                     result.tls_handshake_ms = metrics.get("tls_handshake_ms")
                     result.ip_version = metrics.get("ip_version")
@@ -864,6 +1342,33 @@ class HTTPBenchmarkEngine:
                         result.cert_issuer_cn = issuer_cn
                         result.cert_sans = sans
                         result.cert_wildcard = wildcard
+
+                    # connection reuse detection
+                    if self.enable_connection_reuse:
+                        connection_id = metrics.get("connection_id")
+                        if connection_id:
+                            result.connection_id = connection_id
+                            seen = self._last_connection_id.setdefault(origin, set())
+                            result.connection_reused = connection_id in seen
+                            seen.add(connection_id)
+
+                    # TFO (always None, see HTTPResult.tcp_fast_open docstring)
+                    if self.enable_tfo_detection:
+                        result.tcp_fast_open = metrics.get("tcp_fast_open")
+
+                    # TLS resumption / session ticket
+                    if self.enable_tls_resumption:
+                        result.tls_resumed = metrics.get("tls_resumed", False)
+                    if self.enable_tls_resumption or self.enable_session_ticket:
+                        result.tls_session_id = metrics.get("tls_session_id")
+                    if self.enable_session_ticket:
+                        result.session_ticket = metrics.get("session_ticket", False)
+
+                    # HTTP/2 push detection
+                    if self.enable_push_detection and protocol == HTTPProtocol.HTTP2:
+                        push_promises = transport.get_recent_push_promises()
+                        result.http2_push_count = len(push_promises)
+                        result.http2_pushes = [p["url"] for p in push_promises]
 
                     await self._update_progress()
                     return result
@@ -973,6 +1478,57 @@ class HTTPBenchmarkEngine:
             dns_resolve_ms=dns_ms if dns_error is None else None,
             dns_resolver_ip=self.dns_resolver_ip,
         )
+
+    # ------------------------------------------------------------------
+    # WebSocket handshake timing
+    # ------------------------------------------------------------------
+
+    async def websocket_single(self, target: str, iteration: int = 1) -> HTTPResult:
+        """
+        Perform a WebSocket handshake and measure the time to establish.
+
+        Requires aiohttp to be installed (pip install net-benchmark[websocket]).
+        """
+        if not _AIOHTTP_AVAILABLE:
+            raise ImportError(
+                "aiohttp is required for WebSocket tests. Install with 'pip install net-benchmark[websocket]'"
+            )
+
+        await self._ensure_async_primitives()
+        assert self.semaphore is not None
+
+        start = time.perf_counter()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(target) as _:
+                    ws_handshake_done = time.perf_counter()
+                    handshake_ms = (ws_handshake_done - start) * 1000
+                    result = HTTPResult(
+                        target=target,
+                        method="GET",
+                        start_time=start,
+                        end_time=ws_handshake_done,
+                        total_ms=handshake_ms,
+                        status=QueryStatus.SUCCESS,
+                        iteration=iteration,
+                        websocket_handshake_ms=handshake_ms,
+                    )
+                    await self._update_progress()
+                    return result
+        except Exception as e:
+            end = time.perf_counter()
+            result = HTTPResult(
+                target=target,
+                method="GET",
+                start_time=start,
+                end_time=end,
+                total_ms=(end - start) * 1000,
+                status=QueryStatus.UNKNOWN_ERROR,
+                iteration=iteration,
+                error_message=str(e),
+            )
+            await self._update_progress()
+            return result
 
     # ------------------------------------------------------------------
     # Warmup
