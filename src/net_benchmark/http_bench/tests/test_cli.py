@@ -3,11 +3,18 @@
 import os
 from unittest.mock import AsyncMock, MagicMock
 
+import click
 import pytest
 from click.testing import CliRunner
 
-from net_benchmark.http_bench.analysis import TargetStats
-from net_benchmark.http_bench.cli import http
+from net_benchmark.http_bench.analysis import TargetStats, Threshold, ThresholdResult
+from net_benchmark.http_bench.cli import (
+    _parse_expected_statuses,
+    _parse_thresholds,
+    _report_thresholds,
+    http,
+    parse_threshold,
+)
 from net_benchmark.http_bench.core import (
     HTTPProtocol,
     HTTPResult,
@@ -90,14 +97,20 @@ def mock_run_benchmark(monkeypatch):
     )
 
 
-# Inside mock_load_test_components fixture
 @pytest.fixture
 def mock_load_test_components(monkeypatch):
-    # Patch engine classes in cli
-    monkeypatch.setattr("net_benchmark.http_bench.cli.HTTPBenchmarkEngine", MagicMock())
+    # --- 0.5.2: patched in distributed, not cli. The load-test path no longer
+    # constructs its engines inline — cli.py builds a WorkerConfig and
+    # distributed._run_target creates the engine pair, for the local run and
+    # for spawned workers alike. Patching cli.* here would silently no-op and
+    # these tests would start hitting the network.
+    monkeypatch.setattr(
+        "net_benchmark.http_bench.distributed.HTTPBenchmarkEngine", MagicMock()
+    )
     mock_engine_cls = MagicMock()
-    monkeypatch.setattr("net_benchmark.http_bench.cli.LoadTestEngine", mock_engine_cls)
-
+    monkeypatch.setattr(
+        "net_benchmark.http_bench.distributed.LoadTestEngine", mock_engine_cls
+    )
     # Patch exporter references directly in the cli module (where they are used)
     monkeypatch.setattr("net_benchmark.http_bench.cli.LoadTestCSVExporter", MagicMock())
     monkeypatch.setattr(
@@ -109,7 +122,7 @@ def mock_load_test_components(monkeypatch):
     )
 
     # Configure mock engine
-    def _engine_factory(target, http_engine=None):
+    def _engine_factory(target, http_engine=None, **kwargs):
         engine = MagicMock()
         engine.run_throughput = AsyncMock()
         engine.run_sustained = AsyncMock()
@@ -1190,7 +1203,7 @@ class TestLoadTest:
         )
         assert result.exit_code == 0
         output = result.output
-        assert "Connection reuse tracking: on" in output
+        assert "Connection reuse tracking: always on" in output
         assert "TLS resumption detection:  on" in output
         assert "HTTP/2 push detection:     on" in output
 
@@ -1267,3 +1280,140 @@ class TestLoadTest:
         from net_benchmark.http_bench.cli import LoadTestCSVExporter
 
         LoadTestCSVExporter.export_raw_results.assert_called_once()
+
+
+class TestHelperFunctions:
+    """Tests for the CLI helper functions added in 0.5.2."""
+
+    # ------------------------------------------------------------------
+    # _parse_expected_statuses
+    # ------------------------------------------------------------------
+    def test_parse_expected_statuses_default(self):
+        result = _parse_expected_statuses(None)
+        assert result == set(range(200, 400))
+
+    def test_parse_expected_statuses_empty_string(self):
+        result = _parse_expected_statuses("")
+        assert result == set(range(200, 400))
+
+    def test_parse_expected_statuses_single_code(self):
+        result = _parse_expected_statuses("200")
+        assert result == {200}
+
+    def test_parse_expected_statuses_multiple_codes(self):
+        result = _parse_expected_statuses("200,404,301")
+        assert result == {200, 404, 301}
+
+    def test_parse_expected_statuses_range(self):
+        result = _parse_expected_statuses("200-299")
+        assert result == set(range(200, 300))
+
+    def test_parse_expected_statuses_mixed(self):
+        result = _parse_expected_statuses("200-299,404")
+        expected = set(range(200, 300)) | {404}
+        assert result == expected
+
+    def test_parse_expected_statuses_invalid_range(self):
+        with pytest.raises(click.UsageError, match="invalid status range"):
+            _parse_expected_statuses("200-abc")
+
+    def test_parse_expected_statuses_invalid_code(self):
+        with pytest.raises(click.UsageError, match="invalid status code"):
+            _parse_expected_statuses("abc")
+
+    def test_parse_expected_statuses_whitespace_handling(self):
+        result = _parse_expected_statuses(" 200 , 404 ")
+        assert result == {200, 404}
+
+    # ------------------------------------------------------------------
+    # _parse_thresholds
+    # ------------------------------------------------------------------
+    def test_parse_thresholds_valid(self):
+        result = _parse_thresholds(["p95_latency<500"])
+        assert len(result) == 1
+        assert isinstance(result[0], Threshold)
+        assert str(result[0]) == "p95_latency<500"
+
+    def test_parse_thresholds_multiple_valid(self):
+        result = _parse_thresholds(["p95_latency<500", "error_rate<=1"])
+        assert len(result) == 2
+
+    def test_parse_thresholds_invalid_raises_usage_error(self):
+        with pytest.raises(click.UsageError, match="invalid threshold"):
+            _parse_thresholds(["nonsense"])
+
+    def test_parse_thresholds_empty_list(self):
+        result = _parse_thresholds([])
+        assert result == []
+
+    # ------------------------------------------------------------------
+    # _report_thresholds
+    # ------------------------------------------------------------------
+    def test_report_thresholds_all_pass(self, capsys):
+        results = [
+            ThresholdResult(
+                threshold=parse_threshold("p95_latency<500"),
+                passed=True,
+                actual=120.0,
+                error=None,
+            )
+        ]
+        all_ok = _report_thresholds("example.com", results, quiet=False)
+        captured = capsys.readouterr()
+        assert "PASS" in captured.out
+        assert "p95_latency<500" in captured.out
+        assert "actual=120.00" in captured.out
+        assert all_ok is True
+
+    def test_report_thresholds_one_fail(self, capsys):
+        results = [
+            ThresholdResult(
+                threshold=parse_threshold("p95_latency<500"),
+                passed=False,
+                actual=600.0,
+                error=None,
+            )
+        ]
+        all_ok = _report_thresholds("example.com", results, quiet=False)
+        captured = capsys.readouterr()
+        assert "FAIL" in captured.out
+        assert "p95_latency<500" in captured.out
+        assert "actual=600.00" in captured.out
+        assert all_ok is False
+
+    def test_report_thresholds_with_error(self, capsys):
+        results = [
+            ThresholdResult(
+                threshold=parse_threshold("cert_expiry_days>30"),
+                passed=False,
+                actual=None,
+                error="No TLS data",
+            )
+        ]
+        all_ok = _report_thresholds("example.com", results, quiet=False)
+        captured = capsys.readouterr()
+        assert "FAIL" in captured.out
+        assert "cert_expiry_days>30" in captured.out
+        assert "actual=n/a" in captured.out
+        assert "No TLS data" in captured.out
+        assert all_ok is False
+
+    def test_report_thresholds_quiet(self, capsys):
+        results = [
+            ThresholdResult(
+                threshold=parse_threshold("p95_latency<500"),
+                passed=True,
+                actual=200.0,
+                error=None,
+            )
+        ]
+        all_ok = _report_thresholds("example.com", results, quiet=True)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert all_ok is True
+
+    def test_report_thresholds_empty_results(self, capsys):
+        all_ok = _report_thresholds("example.com", [], quiet=False)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert all_ok is True
