@@ -22,12 +22,57 @@ pip install net-benchmark[pdf]   # 如需导出 PDF
 
 ---
 
+## 为什么选择 net-benchmark？
+
+大多数网络工具只回答一个问题就结束了。`dig` 告诉你解析器有响应，`curl` 告诉你请求
+成功了，`ab` 给你一个数字——却不告诉你这个数字反映的是服务端，还是你运行它的那台
+机器。
+
+net-benchmark 的目标是产出**可据以行动、可交付他人的证据**：
+
+| | |
+|---|---|
+| **一个 CLI，三个层面** | DNS、HTTP 与 TLS 共用同一套输出模型——不必拼凑三个工具来解释一次慢加载。 |
+| **经得起推敲的测量** | 分阶段计时（DNS、TCP、TLS、TTFB）、基于真实直方图的百分位数；无法计算的指标会被**省略**，而不是报成具有误导性的零。 |
+| **报告，而非终端回滚** | CSV、带图表的 Excel、PDF 与 JSON——产物可直接放进工单、迁移文档或 CI 任务。 |
+| **面向 CI** | `--threshold 'p95_latency<400'` 失败时返回非零退出码。指标名在运行**之前**校验，拼写错误只花一秒，而不是压测完才报错。 |
+| **加密 DNS 是一等公民** | 支持 DoH 与 DoT 并可校验 DNSSEC，而非事后补丁。 |
+| **对自身局限保持诚实** | 如果瓶颈在工具本身，它会明说——并可用 `--workers` 消除。 |
+
+**它通常回答这些问题：**
+
+```bash
+# “从这个网络出发，哪个解析器最快？”
+net-benchmark dns top --limit 5
+
+# “新 CDN 真的比旧源站快吗？”
+net-benchmark http compare https://old.example.com https://new.example.com
+
+# “大促开始前，结账接口能扛住每秒 400 请求吗？”
+net-benchmark http load-test -t https://checkout.example.com/api/cart \
+  --mode sustained --rps 400 --duration 300 --workers 4 \
+  --threshold 'p95_latency<400'
+```
+
+### 0.5.2 新增内容
+
+**分布式负载测试。** 在目标被压垮之前，单个 Python 进程往往先成为瓶颈。
+`--workers N` 现在可以从 N 个独立进程发起负载并同步启动；百分位数由**合并后的
+直方图重新计算**，而不是对各 worker 的结果取平均——把多个 P95 平均起来得到的是
+另一个数字，而非近似值。负载还可通过共享启动屏障跨多台机器运行，并用新的
+`merge-load-test` 收集器合并。参见[负载测试](#-负载测试)。
+
+此外：面向 CI 的通过/失败阈值、逐区间实时输出、backlog 控制（使过载表现为丢弃而非
+虚高的延迟），以及通过 `--expected-status` 自定义成功状态码。
+
 ## 目录
 
+- [为什么选择 net-benchmark？](#为什么选择-net-benchmark)
 - [安装](#安装)
 - [工具](#工具)
   - [DNS 基准测试](#dns-基准测试)
   - [HTTP 基准测试](#http-基准测试)
+    - [负载测试](#-负载测试)
   - [SSL 检查](#ssl-检查)
 - [导出格式](#导出格式)
 - [发布流程](#发布流程)
@@ -275,12 +320,12 @@ net-benchmark dns benchmark --use-defaults --doh --dot
 # ERROR: --doh and --dot are mutually exclusive.
 
 # --doh-url 数量必须与 --resolvers 数量一致
-net-benchmark dns benchmark --resolvers "Cloudflare,Google" --doh \
+net-benchmark dns benchmark --resolvers "Cloudflare,Google" --domains "bing.com,google.com" --doh \
   --doh-url "https://cloudflare-dns.com/dns-query"
 # ERROR: --doh-url has 1 URL(s) but --resolvers has 2 resolver(s). Counts must match.
 
 # 自定义 IP 使用 --doh 时必须提供 --doh-url
-net-benchmark dns benchmark --resolvers "192.168.1.1" --doh
+net-benchmark dns benchmark --resolvers "192.168.1.1" --domains "google.com" --doh
 # ERROR: --doh requires a DoH URL for: 192.168.1.1. Use --doh-url to supply them explicitly.
 ```
 
@@ -362,9 +407,10 @@ net-benchmark dns benchmark \
 # 验证 DNS 迁移
 net-benchmark dns benchmark \
   --resolvers old-provider.json,new-provider.json \
-  --zone-transfer \ # 即将推出
+  --domains business-domains.txt \
   --output migration-report/ \
   --formats pdf,excel
+# 区域传输（AXFR/IXFR）验证尚未实现 — 见上文"高级能力"。
 ```
 
 </details>
@@ -445,9 +491,10 @@ net-benchmark dns benchmark \
 
 ```bash
 # 在切换 DNS 服务商前测试新旧解析器
+# （--use-defaults 会覆盖 --resolvers，因此改用 --domains）
 net-benchmark dns benchmark \
   --resolvers current-dns.json,new-dns.json \
-  --use-defaults \
+  --domains business-domains.txt \
   --dnssec-validate \
   --output migration-report/ \
   --formats csv,excel
@@ -461,10 +508,10 @@ net-benchmark dns benchmark \
 
 ```bash
 # 对比 Pi-hole 与公共 DNS
-net-benchmark dns compare \
-  --resolvers pihole.local,1.1.1.1,8.8.8.8,9.9.9.9 \
+# （解析器是位置参数，不是 --resolvers 选项）
+net-benchmark dns compare pihole.local 1.1.1.1 8.8.8.8 9.9.9.9 \
   --domains common-sites.txt \
-  --rounds 10
+  --iterations 10
 ```
 
 **结果：** 用数据证明自建 DNS 是否真的更快
@@ -1060,7 +1107,7 @@ net-benchmark dns benchmark \
 ```bash
 # 命令未找到
 pip install -e .
-python -m net_benchmark.dns_benchmark.cli --help
+net-benchmark dns --help
 
 # PDF 生成失败 (Ubuntu/Debian) – 参见 [PDF 依赖](#pdf-dependencies)
 sudo apt-get install libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
@@ -1077,7 +1124,7 @@ net-benchmark dns benchmark --use-defaults --max-concurrent 25
 
 ```bash
 # 详细运行
-python -m net_benchmark.dns_benchmark.cli benchmark --use-defaults --formats csv
+net-benchmark dns benchmark --use-defaults --formats csv
 
 # 最小化配置
 net-benchmark dns benchmark --resolvers "1.1.1.1" --domains "google.com" --formats csv
@@ -1152,6 +1199,10 @@ net-benchmark dns benchmark --resolvers "1.1.1.1" --domains "google.com" --forma
 ```bash
 net-benchmark dns --help
 net-benchmark dns benchmark --help
+net-benchmark dns top --help
+net-benchmark dns compare --help
+net-benchmark dns monitoring --help
+net-benchmark dns list-defaults --help
 net-benchmark dns list-resolvers --help
 net-benchmark dns list-domains --help
 net-benchmark dns list-categories --help
@@ -1167,7 +1218,7 @@ net-benchmark dns benchmark --use-defaults
 
 # 测试特定解析器
 net-benchmark dns list-resolvers --category security
-net-benchmark dns benchmark --resolvers data/security_resolvers.json --use-defaults
+net-benchmark dns benchmark --resolvers data/security_resolvers.json --domains data/domains.txt
 
 # 生成管理报告
 net-benchmark dns benchmark --use-defaults --formats excel,pdf \
@@ -1305,14 +1356,15 @@ net-benchmark http benchmark --use-defaults --iterations 5   # 获得有意义�
 | 命令 | 功能 | 快速示例 |
 |---|---|---|
 | `benchmark` | 完整 HTTP 基准测试并导出 | `net-benchmark http benchmark --use-defaults` |
-| `top` | 按速度对目标排名 | `net-benchmark http top --limit 5` |
+| `top` | 按速度对目标排名 | `net-benchmark http top --use-defaults --limit 5` |
 | `compare` | 并排对比目标 | `net-benchmark http compare api.example.com api2.example.com` |
 | `monitoring` | 持续监控并告警 | `net-benchmark http monitoring --use-defaults` |
 | `load-test` | 持续负载测试，支持可配置流量整形 | `net-benchmark http load-test -t https://api.example.com --mode throughput --duration 30` |
+| `merge-load-test` | 合并分布式运行的 worker 汇总结果 | `net-benchmark http merge-load-test ./nodes/*.json -o ./merged` |
 
 ```bash
 # 立刻找出当前最快的端点
-net-benchmark http top --limit 5
+net-benchmark http top --use-defaults --limit 5
 
 # 并排对比两个 API
 net-benchmark http compare api.example.com api2.example.com --iterations 3 --show-details
@@ -1429,11 +1481,11 @@ net-benchmark http benchmark \
   --targets https://mtls.example.com \
   --cert client.pem --cert-key client-key.pem
 
-# 带认证的代理
+# 带凭据的代理
+# （--auth 认证的是*源站*，不是代理——代理凭据应写入代理 URL 本身）
 net-benchmark http benchmark \
   --targets https://example.com \
-  --proxy http://proxy:8080 \
-  --auth "basic:proxyuser:proxypass"
+  --proxy http://proxyuser:proxypass@proxy:8080
 ```
 
 ---
@@ -1651,18 +1703,26 @@ net-benchmark http monitoring \
   --alert-failure-rate 5 \
   --output ./monitoring_logs
 
-# 通过代理监控
+# 仅在源站不可达时告警，而不是在合法的 403 上告警
 net-benchmark http monitoring \
   --targets https://internal-api.example.com \
-  --proxy http://proxy:8080 \
+  --expected-status 200,403 \
+  --alert-transport-error-rate 5 \
   --interval 60
 ```
+
+> `http monitoring` 没有 `--proxy`。代理支持位于 `http benchmark` 和 `http compare`。
 
 ---
 
 #### ⚡ 负载测试
 
 `net-benchmark http load-test` 对一个或多个 HTTP 目标运行持续流量，使用三种流量整形策略。与 `benchmark`（固定迭代次数）不同，load-test 持续运行一段时间，并报告实际吞吐量、延迟百分位数和连接层行为。
+
+自 **0.5.2** 起，负载还可由多个并行 worker 生成——同一台机器上的多个进程，或多台
+不同的机器——它们同步启动，并在结束时进行统计学上正确的合并。
+
+> 完整参考：**[HTTP 负载测试](https://net-benchmark.readthedocs.io/en/latest/http-load-test.html)**
 
 ##### 模式
 
@@ -1692,7 +1752,6 @@ net-benchmark http load-test \
   --mode sustained \
   --rps 150 \
   --duration 300 \
-  --enable-connection-reuse \
   --formats csv,excel,json
 ```
 `sustained` 模式下 `--rps` 是必需的——如果缺失，CLI 会快速失败并给出明确提示。
@@ -1725,21 +1784,136 @@ net-benchmark http load-test \
 net-benchmark http load-test \
   -t https://cdn.example.com/asset.js \
   --mode throughput --duration 60 --max-concurrency 200 \
-  --enable-connection-reuse --enable-tls-resumption --enable-push-detection \
+  --enable-tls-resumption --enable-push-detection \
   --formats json
 ```
-这些检测功能是可选的——它们会增加每个请求的记账开销，因此仅在您真正调查连接复用/TLS 会话恢复/HTTP/2 推送行为时才开启。
+连接复用始终会被记录，无需任何参数——`--enable-connection-reuse` 已废弃且不再有任何效果。另外两项检测是可选的，因为它们会增加每个请求的记账开销：仅在您真正调查 TLS 会话恢复或 HTTP/2 推送行为时才开启。
+
+##### 如何解读结果
+
+| 指标 | 含义 |
+|---|---|
+| **Achieved RPS** | 在运行窗口内*完成*的请求数。要求 400 却只有 180，说明目标跟不上。 |
+| **Avg blocked** | 等待空闲连接槽的时间。**你这一侧**。 |
+| **Avg waiting** | 等待服务端响应的时间。**对方那一侧**。 |
+
+`blocked` 上升而 `waiting` 保持平稳，是输出中最有价值的信号：说明你测的是自己的
+压力发生器，而不是目标。`--workers` 正是为解决这一点而存在。
+
+##### 分布式负载生成（0.5.2）
+
+单个 Python 进程——一个 GIL、一个事件循环、一个连接池——往往在目标被压垮之前就
+成为瓶颈。`--workers` 会从 N 个**独立进程**生成负载，按共享的挂钟屏障同步启动，
+并在结束时合并。
+
+```bash
+# 基线：单进程。
+net-benchmark http load-test -t https://api.example.com/health \
+  --mode throughput --duration 20 --max-concurrency 50
+
+# 四个进程。--max-concurrency 是「每 worker」的：总计 200 并发。
+net-benchmark http load-test -t https://api.example.com/health \
+  --mode throughput --duration 20 --max-concurrency 50 --workers 4
+```
+
+请求开始前会有约 5 秒的停顿——这是启动屏障，其提前量足以让每个新建解释器完成导入。
+
+- RPS 随 worker 数增长且 `blocked` 平稳 → 原先的瓶颈是单进程，现已消除。
+- RPS 几乎不变而 `waiting` 上升 → 目标已饱和。这是结论，不是失败。
+- RPS 几乎不变而 `blocked` 上升 → 遇到机器上限（网卡、CPU、端口）。多进程能绕开
+  GIL，但不会多出一块网卡。
+
+**速率拆分。** `--rps` 是整次运行的**总速率**，会在各 worker 间均分：
+
+```bash
+# 4 个 worker 各按 100 RPS 发送；合并后的汇总报告 400。
+net-benchmark http load-test -t https://api.example.com/cart \
+  --mode sustained --rps 400 --duration 30 --workers 4 --max-backlog 20
+```
+
+**目标拓扑。** 存在多个目标时，`--target-distribution` 决定 `--workers` 放大的是
+什么——同时也改变 `--rps` 的含义：
+
+| 取值 | 行为 | `--rps` 表示 | 适用场景 |
+|---|---|---|---|
+| `replicate`（默认） | 每个 worker 运行全部目标 | 运行**总量**，均分 | 压满单个源站 |
+| `shard` | 目标轮转分配，每个目标一个 worker | **每个目标**的速率，不均分 | 并行测量更多目标 |
+
+##### 跨多台机器运行（0.5.2）
+
+多进程消除了 GIL 和单事件循环，但消除不了网卡，也改变不了「所有流量都来自同一处」
+这一事实。若要模拟真正来自多个地区的流量，请每个地区部署一个节点，共用同一个启动
+屏障，最后合并结果。
+
+```bash
+# 1. 选定屏障——打印出可粘贴到每个节点的 epoch。
+net-benchmark http load-test -t https://example.com \
+  --duration 60 --start-delay 120 --quiet
+# [i]   Start barrier: 1754320000.000 (epoch seconds, UTC)
+
+# 2. 每个节点使用「完全相同」的 --start-at，各自的标签与速率份额。
+net-benchmark http load-test -t https://example.com \
+  --mode sustained --rps 250 --duration 60 \
+  --start-at 1754320000.000 --warmup 10 \
+  --worker-id hel1 --region eu-north \
+  --emit-summary hel1.json --formats csv
+
+# 3. 收集并合并。
+net-benchmark http merge-load-test ./nodes/*.json \
+  -o ./merged --threshold 'p95_latency<500'
+```
+
+百分位数由合并后的延迟直方图重新计算。把多个节点的 P95 取平均，得到的并不是它们
+并集的 P95——那是另一个数字，而非近似值。
+
+`--warmup` 会在屏障**之前**建立连接：否则同步启动就是同步冷启动，开头几秒测的是
+TLS 握手。若已测得时钟偏移，超过 50 ms 时合并会被拒绝——各节点对 epoch 达成一致，
+只能证明它们被*告知*了同一个值。
+
+##### 通过/失败阈值（CI）
+
+阈值在运行**之前**解析，指标名也一并校验，因此拼写错误只花一秒，而不是压测完才
+报错。任一失败都会以非零码退出。
+
+```bash
+net-benchmark http load-test \
+  -t https://staging.example.com/api/health \
+  --mode sustained --rps 200 --duration 60 \
+  --workers 4 --max-backlog 50 --warmup 10 \
+  --expected-status 200,404 \
+  --threshold 'p95_latency<400' \
+  --threshold 'success_rate>99.5' \
+  --threshold 'dropped_rate<1'
+```
+
+百分位数可以合并。离散度与分阶段计时类指标（`std_latency`、`jitter`、
+`consistency_score`、`p95_ttfb_ms`、`p95_duration_ms`、`p95_blocked_ms`、
+`p95_waiting_ms`）不能合并，在合并后的运行中会被**拒绝**，而不是对着一个结构性的
+零通过。在 `--workers 1` 下它们依然精确，也可在 `*_workers.csv` 中按 worker 查看。
 
 ##### 输出格式
 
 | 格式    | 内容                                                         |
 |---------|--------------------------------------------------------------|
-| `csv`   | 原始结果、汇总、每秒时间线、错误分类                         |
+| `csv`   | 原始结果、汇总、按 worker 汇总、逐区间时间线、错误分类、延迟直方图 |
 | `excel` | 对比表 + 每个目标的原始/时间线工作表，可选图表               |
 | `pdf`   | 带图表的报告（需要 `pip install net-benchmark[pdf]`）        |
 | `json`  | 完整的结构化数据包，包含所有目标                             |
 
 > **注意：** PDF 导出失败是软失败——如果未安装 `weasyprint`，运行仍会完成，其他格式仍然会被写入；请检查 CLI 输出中的 `PDF export failed`。
+
+##### 限制与注意事项
+
+- **并发相关的参数都是「每 worker」的。** `--workers 4 --max-concurrency 50` 意味着
+  总计 200 并发；`--max-backlog` 与 `--max-total-rps` 同理。`replicate` 下的
+  `--rps` 是唯一例外。
+- **`--workers > 1` 时不保留逐请求原始行。** 无论是否设置 `--no-retain-results`，
+  `*_raw.csv` 与各目标的 Excel 工作表都是空的。所有统计量、区间数据与直方图都会保留。
+- **`--live` 仅支持单 worker。** 区间回调无法传入新建的进程；worker 数大于 1 时
+  CLI 会给出警告并继续，而不是默默不输出。
+- **将要合并的 worker 必须使用相同的 `--interval-bucket`。** 宽度不一致会被拒绝。
+- **worker 死亡意味着这部分负载从未被发出。** 失败会按目标单独报告，而不会被折进
+  合并汇总里。
 
 ---
 
@@ -1747,7 +1921,7 @@ net-benchmark http load-test \
 
 | 命令 | 目的 | 典型用例 | 关键选项 | 输出 |
 |---|---|---|---|---|
-| **top** | 按速度/可靠性快速排名 | 快速查看当前哪个端点最好 | `--limit`, `--metric`, `--iterations` | 包含延迟和成功率的排序列表 |
+| **top** | 按速度/可靠性快速排名 | 快速查看当前哪个端点最好 | `--targets`/`--use-defaults`, `--limit`, `--metric` | 包含延迟和成功率的排序列表 |
 | **compare** | 特定目标的并排对比 | 对选定端点进行详细基准测试 | `--iterations`, `--show-details`, `--output` | 包含延迟、TTFB、成功率和每次迭代分解的对比表 |
 | **monitoring** | 持续监控并告警 | 实时跟踪端点健康状态随时间的变化 | `--interval`, `--duration`, `--alert-latency`, `--alert-failure-rate`, `--output` | 实时状态、告警、每次间隔的 JSON 快照 |
 
@@ -1787,7 +1961,7 @@ net-benchmark http load-test \
 ```bash
 # 命令未找到
 pip install -e .
-python -m net_benchmark.http_bench.cli --help
+net-benchmark http --help
 
 # PDF 生成失败 (Ubuntu/Debian) — 参见 PDF 依赖
 sudo apt-get install libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
@@ -1814,6 +1988,7 @@ net-benchmark http top --help
 net-benchmark http compare --help
 net-benchmark http monitoring --help
 net-benchmark http load-test --help
+net-benchmark http merge-load-test --help
 ```
 
 常见场景：

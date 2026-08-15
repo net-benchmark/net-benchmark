@@ -107,6 +107,12 @@ net-benchmark
 
 .. toctree::
    :maxdepth: 1
+   :caption: Documentazione italiana (Italian)
+
+   it/index
+
+.. toctree::
+   :maxdepth: 1
    :caption: Project
 
    changelog
