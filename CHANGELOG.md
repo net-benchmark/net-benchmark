@@ -1,3 +1,15 @@
+## v0.5.2 (2026-08-15)
+
+### Feat
+
+- **http_bench_cli**: add distributed orchestration and expose it on the cli
+- **http_bench_load_test**: add emit_empty_intervals and close windows on elapsed time
+- **http_bench_core**: merge load test results across parallel workers
+
+### Fix
+
+- **dns_core**: invoke progress_callback outside the lock and isolate it
+
 ## v0.5.1 (2026-07-18)
 
 ### Feat
