@@ -6,6 +6,7 @@ for time-series (base.py's generate_bar_chart is bar-only).
 """
 
 import base64
+import csv
 import os
 import re
 import tempfile
@@ -69,12 +70,129 @@ def error_breakdown(summary: LoadTestSummary) -> Dict[str, int]:
     LoadTestSummary.results since load tests don't go through HTTPAnalyzer
     for the raw-result path (only for the aggregate stats).
     """
+
+    # --- 0.5.2: prefer LoadTestSummary.error_breakdown, which _summarize()
+    # builds while the results are still in hand. The earlier fallback to the
+    # status code distribution only recovered 4xx/5xx: transport failures
+    # (DNS, connection refused, TLS, timeout) carry no status code and
+    # vanished entirely, so with retain_results=False the errors file looked
+    # complete while omitting every real failure — worse than being empty.
+    if summary.error_breakdown:
+        return dict(summary.error_breakdown)
+    if not summary.results:
+        return {}
+
     counts = Counter(
         r.error_message or f"HTTP {r.http_status_code}"
         for r in summary.results
         if r.status != QueryStatus.SUCCESS
     )
     return dict(counts)
+
+
+def export_latency_histograms(
+    summaries: List[LoadTestSummary],
+    output_path: str,
+    filename_prefix: str,
+) -> str:
+    """--- 0.5.2: write the mergeable latency histogram buckets to CSV.
+
+    The histogram previously reached JSON only. It is the artifact a
+    distributed run consumes — several workers or nodes each emit one, and
+    LatencyHistogram.merge_all() folds them into correct global percentiles
+    (averaging p95s does not work). A flat CSV makes that usable from outside
+    Python too.
+
+    One row per non-empty bucket. The layout parameters are repeated on every
+    row because merging is only valid between histograms that share them.
+    """
+    path = os.path.join(output_path, f"{filename_prefix}_histogram.csv")
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            [
+                "target",
+                # --- 0.5.2: identity, so rows from several workers can share
+                # a file and still be told apart.
+                "worker_id",
+                "region",
+                "lowest_ms",
+                "sub_buckets",
+                "max_exponent",
+                "bucket_index",
+                "lower_ms",
+                "upper_ms",
+                "count",
+                "total_count",
+                "overflow_count",
+                # --- 0.5.2: tracked exactly, not bucketed. Without these an
+                # external collector merging from this CSV could recover
+                # correct percentiles but had to reconstruct mean/min/max from
+                # bucket midpoints — losing the one property LatencyHistogram
+                # advertises as exact, in the very file written for
+                # cross-process merging. Repeated per row so a single row is
+                # enough to rebuild a mergeable histogram.
+                "min_ms",
+                "max_ms",
+                "total_ms",
+            ]
+        )
+        for s in summaries:
+            h = s.latency_histogram
+            if h is None or not h.counts:
+                continue
+            for idx in sorted(h.counts):
+                lo, hi = h.bucket_bounds(idx)
+                writer.writerow(
+                    [
+                        s.target,
+                        s.worker_id or "",
+                        s.region or "",
+                        h.lowest_ms,
+                        h.sub_buckets,
+                        h.max_exponent,
+                        idx,
+                        round(lo, 6),
+                        round(hi, 6),
+                        h.counts[idx],
+                        h.count,
+                        h.overflow_count,
+                        h.min_ms if h.min_ms is not None else "",
+                        h.max_ms if h.max_ms is not None else "",
+                        round(h.total, 6),
+                    ]
+                )
+    return path
+
+
+def _phase_timeline_chart(summary: LoadTestSummary, output_path: str) -> str:
+    """--- 0.5.2: waiting vs blocked over time.
+
+    The single most useful load-test chart the tool was missing. `waiting` is
+    the target's own response time with local queueing excluded; `blocked` is
+    time spent waiting for a connection from the pool. If blocked climbs while
+    waiting stays flat, the generator has saturated and the run has stopped
+    measuring the target — which is exactly the single-node limitation, made
+    visible rather than inferred.
+    """
+    # --- 0.5.2: a run shorter than one interval bucket has no completed
+    # windows; plotting it produced a blank chart rather than being skipped.
+    # Callers treat "" as "no chart".
+    if not summary.intervals:
+        return ""
+    x = [float(iv.window_index) for iv in summary.intervals]
+    series = {
+        "waiting — server (ms)": [iv.stats.avg_waiting_ms for iv in summary.intervals],
+        "blocked — pool queue (ms)": [
+            iv.stats.avg_blocked_ms for iv in summary.intervals
+        ],
+        "duration excl. setup (ms)": [
+            iv.stats.avg_duration_ms for iv in summary.intervals
+        ],
+    }
+    return _generate_line_chart(
+        x, series, "Seconds", "ms", f"Phase breakdown — {summary.target}", output_path
+    )
 
 
 def combined_error_breakdown(summaries: List[LoadTestSummary]) -> Dict[str, int]:
@@ -208,6 +326,21 @@ class LoadTestCSVExporter:
             rows.append(
                 {
                     "target": s.target,
+                    # --- 0.5.2: identity and merge provenance. This exporter
+                    # is now used for the merged summary AND the per-worker
+                    # rows behind it, and a file where those two are
+                    # indistinguishable is worse than no file.
+                    "worker_id": s.worker_id or "",
+                    "region": s.region or "",
+                    "merged": s.merged,
+                    "merged_from": ";".join(s.merged_from),
+                    "start_offset_s": round(s.start_offset_s, 4),
+                    "clock_offset_ms": (
+                        round(s.clock_offset_s * 1000, 3)
+                        if s.clock_offset_s is not None
+                        else ""
+                    ),
+                    "interval_bucket_s": s.interval_bucket_s,
                     "mode": s.mode.value,
                     "duration_s": round(s.duration_s, 2),
                     "total_requests": s.stats.total_requests,
@@ -221,7 +354,11 @@ class LoadTestCSVExporter:
                     "p95_latency_ms": round(s.stats.p95_latency, 2),
                     "p99_latency_ms": round(s.stats.p99_latency, 2),
                     "max_latency_ms": round(s.stats.max_latency, 2),
-                    "jitter_ms": round(s.stats.jitter, 2),
+                    # --- 0.5.2: blank, not 0.0, on a merged row — see
+                    # analysis.UNMERGEABLE_METRICS. 0.0 is also the
+                    # "no samples" value, so writing it would make a
+                    # merged run look like a measured zero.
+                    "jitter_ms": ("" if s.merged else round(s.stats.jitter, 2)),
                     "connections_opened": s.connection_reuse.connections_opened,
                     "connections_reused": s.connection_reuse.connections_reused,
                     "reuse_rate_pct": round(s.connection_reuse.reuse_rate * 100, 2),
@@ -233,6 +370,63 @@ class LoadTestCSVExporter:
                     ),
                     "tls_resumption_rate_pct": round(s.stats.tls_resumption_rate, 2),
                     "http2_push_total": s.stats.http2_push_total,
+                    # --- 0.5.2: load-shaping health. Without these, achieved_rps
+                    # cannot be interpreted — a run that dropped a third of
+                    # its scheduled requests looks identical to one that
+                    # didn't.
+                    "scheduled_requests": s.counters.scheduled,
+                    "started_requests": s.counters.started,
+                    "dropped_requests": s.counters.dropped,
+                    "dropped_rate_pct": round(s.dropped_rate, 2),
+                    "interrupted_requests": s.counters.interrupted,
+                    "worker_errors": s.counters.worker_errors,
+                    "avg_queue_delay_ms": round(s.counters.avg_queue_delay_ms, 2),
+                    "max_queue_delay_ms": round(s.counters.max_queue_delay_ms, 2),
+                    # --- 0.5.2: phase timings. duration excludes connection
+                    # setup, so it is the cross-run comparable latency;
+                    # blocked is client-side queueing.
+                    "avg_duration_ms": round(s.stats.avg_duration_ms, 2),
+                    # --- 0.5.2: blank, not 0.0, on a merged row — see
+                    # analysis.UNMERGEABLE_METRICS. 0.0 is also the
+                    # "no samples" value, so writing it would make a
+                    # merged run look like a measured zero.
+                    "p95_duration_ms": (
+                        "" if s.merged else round(s.stats.p95_duration_ms, 2)
+                    ),
+                    "avg_blocked_ms": round(s.stats.avg_blocked_ms, 2),
+                    # --- 0.5.2: blank, not 0.0, on a merged row — see
+                    # analysis.UNMERGEABLE_METRICS. 0.0 is also the
+                    # "no samples" value, so writing it would make a
+                    # merged run look like a measured zero.
+                    "p95_blocked_ms": (
+                        "" if s.merged else round(s.stats.p95_blocked_ms, 2)
+                    ),
+                    "avg_admission_wait_ms": round(s.stats.avg_admission_wait_ms, 2),
+                    "avg_sending_ms": round(s.stats.avg_sending_ms, 2),
+                    "avg_waiting_ms": round(s.stats.avg_waiting_ms, 2),
+                    # --- 0.5.2: blank, not 0.0, on a merged row — see
+                    # analysis.UNMERGEABLE_METRICS. 0.0 is also the
+                    # "no samples" value, so writing it would make a
+                    # merged run look like a measured zero.
+                    "p95_waiting_ms": (
+                        "" if s.merged else round(s.stats.p95_waiting_ms, 2)
+                    ),
+                    "avg_receiving_ms": round(s.stats.avg_receiving_ms, 2),
+                    "avg_ttfb_ms": round(s.stats.avg_ttfb_ms, 2),
+                    # --- 0.5.2: failure split. success_rate above counts a 404
+                    # and a connection reset the same way.
+                    "transport_error_rate_pct": round(s.stats.transport_error_rate, 2),
+                    "unexpected_status_rate_pct": round(
+                        s.stats.unexpected_status_rate, 2
+                    ),
+                    # --- 0.5.2: throughput in bytes
+                    "total_response_bytes": s.stats.total_response_bytes,
+                    "received_bytes_per_s": round(s.received_bytes_per_s, 2),
+                    "sent_bytes_per_s": round(s.sent_bytes_per_s, 2),
+                    # --- 0.5.2: setup-timing denominators. avg_tcp/avg_tls are
+                    # now means over NEW connections only.
+                    "connections_measured": s.stats.connections_measured,
+                    "dns_lookups_measured": s.stats.dns_lookups_measured,
                 }
             )
         pd.DataFrame(rows).to_csv(output_path, index=False)
@@ -253,6 +447,14 @@ class LoadTestCSVExporter:
                         "avg_latency_ms": round(iv.stats.avg_latency, 2),
                         "p95_latency_ms": round(iv.stats.p95_latency, 2),
                         "p99_latency_ms": round(iv.stats.p99_latency, 2),
+                        # --- 0.5.2: per-second phase view. A rising
+                        # avg_blocked_ms with flat avg_duration_ms is the
+                        # signature of the generator saturating rather than
+                        # the target degrading.
+                        "avg_duration_ms": round(iv.stats.avg_duration_ms, 2),
+                        "avg_blocked_ms": round(iv.stats.avg_blocked_ms, 2),
+                        "avg_waiting_ms": round(iv.stats.avg_waiting_ms, 2),
+                        "avg_ttfb_ms": round(iv.stats.avg_ttfb_ms, 2),
                     }
                 )
         pd.DataFrame(rows).to_csv(output_path, index=False)
@@ -342,9 +544,22 @@ class LoadTestExcelExporter:
                     "Avg (ms)": round(s.stats.avg_latency, 2),
                     "P95 (ms)": round(s.stats.p95_latency, 2),
                     "P99 (ms)": round(s.stats.p99_latency, 2),
+                    # -- 0.5.2: duration excludes connection setup; see
+                    # TargetStats.avg_duration_ms
+                    "P95 Duration (ms)": round(s.stats.p95_duration_ms, 2),
+                    "Avg Blocked (ms)": round(s.stats.avg_blocked_ms, 2),
+                    "Avg Waiting (ms)": round(s.stats.avg_waiting_ms, 2),
                     "Connections Opened": s.connection_reuse.connections_opened,
                     "Reuse Rate (%)": round(s.connection_reuse.reuse_rate * 100, 2),
                     "TLS Resumption Rate (%)": round(s.stats.tls_resumption_rate, 2),
+                    # -- 0.5.2: load-shaping health
+                    "Dropped": s.counters.dropped,
+                    "Dropped (%)": round(s.dropped_rate, 2),
+                    "Interrupted": s.counters.interrupted,
+                    "Max Queue Delay (ms)": round(s.counters.max_queue_delay_ms, 2),
+                    "Transport Err (%)": round(s.stats.transport_error_rate, 2),
+                    "Unexpected Status (%)": round(s.stats.unexpected_status_rate, 2),
+                    "Recv (KB/s)": round(s.received_bytes_per_s / 1024, 1),
                 }
             )
         add_simple_table_sheet(wb, "Summary", pd.DataFrame(rows))
@@ -360,7 +575,37 @@ class LoadTestExcelExporter:
                     "Status": r.status.value,
                     "HTTP Code": r.http_status_code or "",
                     "Total (ms)": round(r.total_ms, 2),
+                    # -- 0.5.2: phase split. Blank rather than 0 when unset, so a
+                    # missing measurement is not read as "zero milliseconds".
+                    "Blocked (ms)": (
+                        round(r.blocked_ms, 2) if r.blocked_ms is not None else ""
+                    ),
+                    "Duration (ms)": (
+                        round(r.duration_ms, 2) if r.duration_ms is not None else ""
+                    ),
+                    "Sending (ms)": (
+                        round(r.sending_ms, 2) if r.sending_ms is not None else ""
+                    ),
+                    "Waiting (ms)": (
+                        round(r.waiting_ms, 2) if r.waiting_ms is not None else ""
+                    ),
                     "TTFB (ms)": round(r.ttfb_ms, 2) if r.ttfb_ms else "",
+                    "Receiving (ms)": (
+                        round(r.receiving_ms, 2) if r.receiving_ms is not None else ""
+                    ),
+                    # -- 0.5.2: blank on reused connections: no connect happened,
+                    # and repeating the original connection's cost here is
+                    # what the core.py fix removed.
+                    "TCP Connect (ms)": (
+                        round(r.tcp_connect_ms, 2)
+                        if r.tcp_connect_ms is not None
+                        else ""
+                    ),
+                    "TLS Handshake (ms)": (
+                        round(r.tls_handshake_ms, 2)
+                        if r.tls_handshake_ms is not None
+                        else ""
+                    ),
                     "Connection Reused": r.connection_reused,
                     "Connection ID": r.connection_id or "",
                     "TLS Resumed": r.tls_resumed,
@@ -386,6 +631,10 @@ class LoadTestExcelExporter:
                     "Avg (ms)": round(iv.stats.avg_latency, 2),
                     "P95 (ms)": round(iv.stats.p95_latency, 2),
                     "P99 (ms)": round(iv.stats.p99_latency, 2),
+                    # --- 0.5.2
+                    "Avg Duration (ms)": round(iv.stats.avg_duration_ms, 2),
+                    "Avg Blocked (ms)": round(iv.stats.avg_blocked_ms, 2),
+                    "Avg Waiting (ms)": round(iv.stats.avg_waiting_ms, 2),
                 }
             )
         name = _sheet_name(summary.target, suffix=" Timeline", used=used_names)
@@ -407,7 +656,14 @@ class LoadTestExcelExporter:
                 thr_path = _throughput_timeline_chart(
                     s, os.path.join(temp_dir, f"throughput_{i}_{safe_name}.png")
                 )
-                chart_paths.extend([lat_path, thr_path])
+                phase_path = _phase_timeline_chart(
+                    s, os.path.join(temp_dir, f"phase_{i}_{safe_name}.png")
+                )
+                chart_paths.extend([lat_path, thr_path, phase_path])
+                entries.append(lat_path)
+                entries.append(thr_path)
+                entries.append(phase_path)
+
                 entries.append(lat_path)
                 entries.append(thr_path)
             if s.status_code_distribution:
@@ -470,7 +726,10 @@ class LoadTestPDFExporter:
                             s,
                             os.path.join(charts_dir, f"throughput_{i}_{safe_name}.png"),
                         )
-                        chart_paths.extend([lat_path, thr_path])
+                        phase_path = _phase_timeline_chart(
+                            s, os.path.join(charts_dir, f"phase_{i}_{safe_name}.png")
+                        )
+                        chart_paths.extend([lat_path, thr_path, phase_path])
                         with open(lat_path, "rb") as f:
                             target_charts["latency"] = base64.b64encode(
                                 f.read()
@@ -479,6 +738,8 @@ class LoadTestPDFExporter:
                             target_charts["throughput"] = base64.b64encode(
                                 f.read()
                             ).decode()
+                        with open(phase_path, "rb") as f:
+                            target_charts["phase"] = base64.b64encode(f.read()).decode()
 
                     if s.status_code_distribution:
                         status_path = _status_code_chart(
@@ -552,6 +813,11 @@ class LoadTestPDFExporter:
                     f"<div class='chart'><img src='data:image/png;base64,"
                     f"{charts['throughput']}' alt='Throughput over time'></div>"
                 )
+            if "phase" in charts:
+                chart_sections = (
+                    f"<div class='chart'><img src='data:image/png;base64,"
+                    f"{charts['phase']}' alt='Phase breakdown'></div>"
+                )
             if "status" in charts:
                 chart_sections += (
                     f"<div class='chart'><img src='data:image/png;base64,"
@@ -559,6 +825,42 @@ class LoadTestPDFExporter:
                 )
             chart_sections += "</div>"
 
+        # -- 0.5.2: load-shaping health. A reader cannot judge "achieved 4800 RPS"
+        # without knowing whether the pacer dropped requests to get there, or
+        # whether the numbers describe the target or the generator's own
+        # queue.
+        health_rows = "".join(
+            f"<tr><td>{s.target}</td>"
+            f"<td>{s.counters.scheduled or s.counters.started}</td>"
+            f"<td>{s.counters.started}</td>"
+            f"<td>{s.counters.dropped} ({s.dropped_rate:.1f}%)</td>"
+            f"<td>{s.counters.interrupted}</td>"
+            f"<td>{s.counters.worker_errors}</td>"
+            f"<td>{s.counters.max_queue_delay_ms:.0f}</td>"
+            f"<td>{s.stats.avg_blocked_ms:.1f}</td>"
+            f"<td>{s.stats.avg_waiting_ms:.1f}</td>"
+            f"<td>{s.stats.p95_duration_ms:.1f}</td>"
+            f"<td>{s.received_bytes_per_s / 1024:.0f}</td></tr>"
+            for s in summaries
+        )
+        health_section = f"""
+        <div class="section">
+        <h2>Load Generation Health</h2>
+        <p>Dropped requests were scheduled but never issued because every
+        worker was busy — a non-zero figure means the achieved rate understates
+        the requested load. Blocked is time waiting for a connection from the
+        pool; Waiting is the target's own response time with that queueing
+        excluded. Blocked climbing while Waiting stays flat means the load
+        generator saturated and the run stopped measuring the target.
+        Duration excludes DNS, TCP and TLS setup.</p>
+        <table>
+        <tr><th>Target</th><th>Scheduled</th><th>Started</th><th>Dropped</th>
+        <th>Interrupted</th><th>Worker Errors</th><th>Max Queue Delay (ms)</th>
+        <th>Avg Blocked (ms)</th><th>Avg Waiting (ms)</th><th>P95 Duration (ms)</th><th>Recv (KB/s)</th></tr>
+            {health_rows}
+        </table>
+        </div>
+        """
         total_requests = sum(s.stats.total_requests for s in summaries)
         total_errors = sum(
             s.stats.total_requests - s.stats.successful_requests for s in summaries
@@ -586,6 +888,8 @@ class LoadTestPDFExporter:
             {summary_rows}
         </table>
         </div>
+
+        {health_section}
 
         {chart_sections}
 

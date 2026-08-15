@@ -1,11 +1,12 @@
 """Export functionality for HTTP benchmark results."""
 
 import base64
+import csv
 import json
 import os
 import tempfile
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -35,6 +36,43 @@ from net_benchmark.http_bench.core import SECURITY_HEADERS, HTTPResult
 
 
 class HTTPExportBundle:
+    @staticmethod
+    def export_threshold_results(
+        results_by_target: Dict[str, List[Any]],
+        output_path: str,
+        filename_prefix: str,
+    ) -> str:
+        """--- 0.5.2: write threshold outcomes to CSV.
+
+        Threshold results previously went to stdout only, so a failed CI run
+        left no structured record of WHICH criterion failed and by how much —
+        exactly what is needed once the build has broken and the console
+        output is gone. One row per (target, threshold).
+
+        Accepts the mapping from HTTPAnalyzer.get_thresholds_report(), or
+        {target: summary.check_thresholds(...)} on the load-test path.
+        """
+        path = os.path.join(output_path, f"{filename_prefix}_thresholds.csv")
+        fieldnames = [
+            "target",
+            "threshold",
+            "metric",
+            "op",
+            "limit",
+            "actual",
+            "passed",
+            "error",
+        ]
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for target, results in results_by_target.items():
+                for r in results:
+                    row = dict(r.to_dict())
+                    row["target"] = target
+                    writer.writerow(row)
+        return path
+
     @staticmethod
     def export_json(
         results: List[HTTPResult],
@@ -77,6 +115,10 @@ class HTTPCSVExporter:
                     "target": s.target,
                     "method": s.method,
                     "total_requests": s.total_requests,
+                    # --- 0.5.2: sample count behind every latency column in
+                    # this row. Differs from successful_requests exactly when
+                    # the target answered outside --expected-status.
+                    "responded_requests": s.responded_requests,
                     "successful_requests": s.successful_requests,
                     "success_rate": s.success_rate,
                     "min_latency_ms": s.min_latency,
@@ -92,9 +134,35 @@ class HTTPCSVExporter:
                     "http2_rate": s.http2_rate,
                     "redirect_rate": round(s.redirect_rate, 2),
                     "avg_response_size_bytes": round(s.avg_response_size_bytes, 2),
+                    # -- 0.5.2: phase timings. duration_ms excludes DNS/TCP/TLS
+                    # setup, so it is comparable across requests regardless of
+                    # whether the connection was reused; latency_ms above is
+                    # not. blocked_ms is client-side queueing.
+                    "avg_duration_ms": round(s.avg_duration_ms, 2),
+                    "p95_duration_ms": round(s.p95_duration_ms, 2),
+                    "avg_blocked_ms": round(s.avg_blocked_ms, 2),
+                    "p95_blocked_ms": round(s.p95_blocked_ms, 2),
+                    "avg_admission_wait_ms": round(s.avg_admission_wait_ms, 2),
+                    "avg_sending_ms": round(s.avg_sending_ms, 2),
+                    "avg_waiting_ms": round(s.avg_waiting_ms, 2),
+                    "p95_waiting_ms": round(s.p95_waiting_ms, 2),
+                    "avg_receiving_ms": round(s.avg_receiving_ms, 2),
                     "avg_dns_ms": round(s.avg_dns_ms, 2),
                     "avg_tcp_ms": round(s.avg_tcp_ms, 2),
                     "avg_tls_ms": round(s.avg_tls_ms, 2),
+                    # --- 0.5.2: denominators for the three averages above. These
+                    # are now means over FRESH lookups / NEW connections only,
+                    # so on a keep-alive-heavy run the counts are far smaller
+                    # than total_requests. Exported so a reader can see the
+                    # sample size rather than assuming it is total_requests.
+                    "dns_lookups_measured": s.dns_lookups_measured,
+                    "connections_measured": s.connections_measured,
+                    # --- 0.5.2: failure split: success_rate counts a 404 and a
+                    # connection reset identically.
+                    "transport_error_rate": round(s.transport_error_rate, 2),
+                    "unexpected_status_rate": round(s.unexpected_status_rate, 2),
+                    "expected_response_rate": round(s.expected_response_rate, 2),
+                    "total_response_bytes": s.total_response_bytes,
                     "avg_compressed_size_bytes": round(s.avg_compressed_size_bytes, 2),
                     "avg_redirect_time_ms": round(s.avg_redirect_time_ms, 2),
                     "http2_downgrade_rate": round(s.http2_downgrade_rate, 2),
@@ -258,6 +326,7 @@ class HTTPExcelExporter:
                     "Target": s.target,
                     "Method": s.method,
                     "Total": s.total_requests,
+                    "Responded": s.responded_requests,  # --- 0.5.2
                     "Successful": s.successful_requests,
                     "Success Rate (%)": round(s.success_rate, 2),
                     "Avg (ms)": round(s.avg_latency, 2),
@@ -270,9 +339,28 @@ class HTTPExcelExporter:
                     "HTTP/2 Rate (%)": round(s.http2_rate, 2),
                     "Redirect Rate (%)": round(s.redirect_rate, 2),
                     "Avg Size (bytes)": round(s.avg_response_size_bytes, 2),
-                    "Avg DNS (ms)": round(s.avg_dns_ms, 2),
-                    "Avg TCP (ms)": round(s.avg_tcp_ms, 2),
-                    "Avg TLS (ms)": round(s.avg_tls_ms, 2),
+                    # --- 0.5.2 — see the CSV exporter above for what these mean
+                    "Avg Duration (ms)": round(s.avg_duration_ms, 2),
+                    "P95 Duration (ms)": round(s.p95_duration_ms, 2),
+                    "Avg Blocked (ms)": round(s.avg_blocked_ms, 2),
+                    "Avg Sending (ms)": round(s.avg_sending_ms, 2),
+                    "Avg Waiting (ms)": round(s.avg_waiting_ms, 2),
+                    "P95 Waiting (ms)": round(s.p95_waiting_ms, 2),
+                    "Avg Receiving (ms)": round(s.avg_receiving_ms, 2),
+                    # --- 0.5.2: headers say "fresh only" / "new conns"
+                    # because the meaning of these changed: they are means
+                    # over fresh DNS lookups and newly opened connections, not
+                    # over every request. Anyone diffing a 0.5.2 export
+                    # against an older one sees the numbers move, and CSV has
+                    # no comment syntax, so the header must carry it.
+                    "Avg DNS (ms, fresh only)": round(s.avg_dns_ms, 2),
+                    "Avg TCP (ms, new conns)": round(s.avg_tcp_ms, 2),
+                    "Avg TLS (ms, new conns)": round(s.avg_tls_ms, 2),
+                    # -- 0,5.2 — sample sizes behind the three averages above
+                    "DNS Lookups": s.dns_lookups_measured,
+                    "Connections": s.connections_measured,
+                    "Transport Err (%)": round(s.transport_error_rate, 2),
+                    "Unexpected Status (%)": round(s.unexpected_status_rate, 2),
                     "Avg Compressed Size (bytes)": round(
                         s.avg_compressed_size_bytes, 2
                     ),
@@ -359,7 +447,10 @@ class HTTPExcelExporter:
         wb: Workbook, analyzer: HTTPAnalyzer, temp_dir: str
     ) -> List[str]:
         target_stats = analyzer.get_target_statistics()
-        valid = [s for s in target_stats if s.successful_requests > 0]
+        # --- 0.5.2: responded_requests, not successful_requests. A target
+        # that answered every request with an unexpected status still has
+        # measured latency and TTFB; gating on success emptied the charts.
+        valid = [s for s in target_stats if s.responded_requests > 0]
 
         names = [s.target.replace("https://", "").replace("http://", "") for s in valid]
 
@@ -427,7 +518,8 @@ class HTTPPDFExporter:
 
         try:
             target_stats = analyzer.get_target_statistics()
-            valid = [s for s in target_stats if s.successful_requests > 0]
+            # --- 0.5.2: see the Excel charts sheet — responded, not successful.
+            valid = [s for s in target_stats if s.responded_requests > 0]
             names = [
                 s.target.replace("https://", "").replace("http://", "") for s in valid
             ]
@@ -495,7 +587,9 @@ class HTTPPDFExporter:
         target_stats = analyzer.get_target_statistics()
         security = analyzer.get_security_summary()
         ranked = sorted(
-            [s for s in target_stats if s.successful_requests > 0],
+            # --- 0.5.2: keeps unexpected-status targets in the PDF ranking
+            # table, and guarantees avg_latency is not NaN for the sort key.
+            [s for s in target_stats if s.responded_requests > 0],
             key=lambda s: s.avg_latency,
         )
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
