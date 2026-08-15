@@ -1,6 +1,7 @@
 # net-benchmark
 
-fast, extensible network benchmarking — dns, http, and ssl from a single cli.
+fast, extensible network benchmarking — dns, http, ssl, and distributed load testing
+from a single cli.
 
 [![PyPI version](https://badge.fury.io/py/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![Python](https://img.shields.io/pypi/pyversions/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
@@ -86,6 +87,49 @@ full documentation: [github.com/net-benchmark/net-benchmark](https://github.com/
 </details>
 
 <details>
+<summary><strong>http load test</strong> — sustained traffic, thresholds, distributed workers</summary>
+
+```bash
+net-benchmark http load-test -t https://api.example.com/health --mode throughput --duration 30
+net-benchmark http load-test -t https://api.example.com --mode sustained --rps 150 --duration 300
+net-benchmark http load-test -t https://api.example.com --mode ramp-up --ramp-concurrency 500
+net-benchmark http load-test -t https://api.example.com --threshold 'p95_latency<500' --threshold 'dropped_rate<1'
+net-benchmark http load-test -t https://api.example.com --workers 4 --emit-summary node-a.json
+net-benchmark http merge-load-test ./nodes/*.json -o ./merged
+```
+
+| flag | description | default |
+|---|---|---|
+| `--targets` / `-t` | comma-separated urls or file | — |
+| `--mode` | `throughput`, `sustained`, `ramp-up` | `throughput` |
+| `--duration` | seconds (throughput/sustained) | `10` |
+| `--rps` | target requests/sec — required for `sustained` | — |
+| `--max-concurrency` | max in-flight requests (throughput) | `200` |
+| `--ramp-concurrency` | peak concurrency to ramp to | `200` |
+| `--max-total-rps` | safety ceiling on aggregate rps during ramp-up | `ramp-concurrency × 50` |
+| `--expected-status` | codes treated as expected, e.g. `200-299,401` | — |
+| `--threshold` | repeatable pass/fail, e.g. `p95_latency<500` | — |
+| `--workers` | generate load from n processes on this machine | `1` |
+| `--target-distribution` | `replicate` (every worker hits every target) or `shard` | `replicate` |
+| `--start-at` / `--start-delay` | synchronised start across machines | — |
+| `--warmup` | requests per target before the start barrier | `0` |
+| `--emit-summary` | write this run's summaries as json, for merging | — |
+| `--region` | label for where this generator runs, e.g. `hel1` | — |
+| `--live` | print each interval as it completes | `false` |
+| `--formats` | csv, excel, pdf, json | `csv,excel` |
+
+since **0.5.2**, load can be generated from several parallel workers — separate processes
+on one machine, or separate machines entirely — with a synchronised start and a
+statistically correct merge. `merge-load-test` recomputes `p95_latency` and `p99_latency`
+from the merged latency histogram rather than averaging per-worker percentiles;
+`std_latency`, `jitter`, `consistency_score` and the phase p95s do not survive a merge and
+are rejected as unknown metrics, so evaluate those per worker.
+
+full documentation: [http load testing](https://net-benchmark.readthedocs.io/en/latest/guides/http-load-test.html)
+
+</details>
+
+<details>
 <summary><strong>ssl check</strong> — certificate expiry and chain validation <em>(coming 0.6.0)</em></summary>
 
 ```bash
@@ -105,7 +149,7 @@ full documentation: [github.com/net-benchmark/net-benchmark](https://github.com/
 | csv | `--formats csv` | raw results + summary |
 | excel | `--formats excel` | charts, dnssec sheet, colour coding |
 | pdf | `--formats pdf` | requires `pip install net-benchmark[pdf]` |
-| json | `--formats json` | full payload including protocol stats |
+| json | `--formats json` | full payload including protocol stats; per-worker summaries and latency histogram on merged runs |
 
 ---
 
