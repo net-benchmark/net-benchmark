@@ -75,6 +75,9 @@ class BenchmarkAnalyzer:
 
     def get_resolver_statistics(self) -> List[ResolverStats]:
         """Compute comprehensive statistics per resolver."""
+        if self.df.empty:
+            return []
+
         resolver_stats = []
 
         for resolver_name in self.df["resolver_name"].unique():

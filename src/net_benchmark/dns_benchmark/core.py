@@ -95,6 +95,10 @@ class DNSQueryEngine:
         self.progress_callback: Optional[Callable[[int, int], None]] = None
         self.query_counter = 0
         self.total_queries = 0
+        # Progress ticks dropped because progress_callback raised. Exposed
+        # for the same reason RunCounters.stream_errors is: a silently
+        # broken consumer callback should be visible after the run.
+        self.progress_errors = 0
         self.enable_cache = enable_cache
         self.cache: Dict[str, DNSQueryResult] = {}
         self.retry_backoff_multiplier = retry_backoff_multiplier
@@ -136,13 +140,43 @@ class DNSQueryEngine:
             self._lock = asyncio.Lock()
 
     async def _update_progress(self) -> None:
-        """Thread-safe progress update."""
+        """Thread-safe progress update.
+
+        The callback is invoked OUTSIDE the lock and isolated from
+        exceptions, matching how LoadTestEngine._stream_intervals already
+        treats on_interval.
+
+        It previously ran INSIDE the lock, so every query completion in a
+        run serialised behind whatever the consumer's callback did. A
+        consumer doing real work there -- a Redis publish, a database
+        write -- silently capped effective concurrency at that callback's
+        latency no matter what max_concurrent_queries was set to.
+
+        It was also unguarded, so a raising callback propagated into the
+        query task and killed it. A progress tick is telemetry; losing one
+        must never lose a query.
+
+        Snapshotting both counters in one critical section also fixes a
+        latent read tear: they were two separate attribute loads from
+        inside the callback, so a consumer could observe a counter from one
+        query alongside a total from another.
+        """
         await self._ensure_async_primitives()
         assert self._lock is not None
         async with self._lock:
             self.query_counter += 1
-            if self.progress_callback:
-                self.progress_callback(self.query_counter, self.total_queries)
+            completed = self.query_counter
+            total = self.total_queries
+            callback = self.progress_callback
+
+        if callback is None:
+            return
+        try:
+            callback(completed, total)
+        except Exception:  # noqa: BLE001
+            # Counted rather than echoed: a CLI run would otherwise emit one
+            # line per query against a broken consumer callback.
+            self.progress_errors += 1
 
     async def _get_doh_client(self, resolver_ip: str) -> httpx.AsyncClient:
         """Return cached AsyncClient for this resolver, creating if needed."""
