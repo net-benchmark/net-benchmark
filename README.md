@@ -27,12 +27,62 @@ pip install net-benchmark[pdf]   # with pdf export
 > **Successor to [dns-benchmark-tool](https://github.com/net-benchmark/dns-benchmark-tool)** — fully backward compatible.
 > `dns-benchmark` command still works as an alias.
 
+## Why net-benchmark?
+
+Most network tooling answers one question and stops. `dig` tells you a resolver
+responded. `curl` tells you a request succeeded. `ab` gives you a number without
+telling you whether that number is about the server or about the machine you ran
+it on.
+
+net-benchmark exists to produce **evidence you can act on and hand to someone
+else**:
+
+| | |
+|---|---|
+| **One CLI, three layers** | DNS, HTTP and TLS from a single tool with one output model — no stitching three utilities together to explain one slow page load. |
+| **Measurements you can defend** | Per-phase timing (DNS, TCP, TLS, TTFB), percentiles from real histograms, and metrics that are *omitted* rather than reported as a misleading zero when they cannot be computed. |
+| **Reports, not scrollback** | CSV, Excel with charts, PDF and JSON — the artifact goes in the ticket, the migration doc, or the CI job. |
+| **CI-ready** | `--threshold 'p95_latency<400'` exits non-zero. Metric names are validated before the run starts, so a typo costs a second rather than a full load test. |
+| **Encrypted DNS as a first-class citizen** | DoH and DoT with DNSSEC validation, not an afterthought. |
+| **Honest about its own limits** | If the tool is the bottleneck, it says so — and `--workers` lets you remove it. |
+
+**Typical questions it answers:**
+
+```bash
+# "Which resolver is actually fastest from this network?"
+net-benchmark dns top --limit 5
+
+# "Is our new CDN faster than the old origin?"
+net-benchmark http compare https://old.example.com https://new.example.com
+
+# "Can checkout hold 400 requests/second before we open the sale?"
+net-benchmark http load-test -t https://checkout.example.com/api/cart \
+  --mode sustained --rps 400 --duration 300 --workers 4 \
+  --threshold 'p95_latency<400'
+```
+
+### What's new in 0.5.2
+
+**Distributed load testing.** A single Python process is usually the bottleneck
+long before your target is. `--workers N` generates load from N separate
+processes with a synchronised start, and percentiles are recalculated from
+merged histograms rather than averaged — averaging P95s across workers gives a
+different number, not an approximation. Runs can also span several machines via
+a shared start barrier and the new `merge-load-test` collector. See
+[Load Testing](#-load-testing).
+
+Also: pass/fail thresholds for CI, per-interval live output, backlog control so
+overload shows up as drops instead of inflated latency, and user-defined success
+codes via `--expected-status`.
+
 ## Table of Contents
 
+- [Why net-benchmark?](#why-net-benchmark)
 - [Installation](#installation)
 - [Tools](#tools)
   - [DNS benchmark](#dns-benchmark)
   - [HTTP benchmark](#http-benchmark)
+    - [Load Testing](#-load-testing)
   - [SSL check](#ssl-check)
 - [Export formats](#export-formats)
 - [Release workflow](#release-workflow)
@@ -240,6 +290,9 @@ net-benchmark dns benchmark \
   --dnssec-validate
 
 # DOH rank top resolvers
+# Note: `top` without --category tests every resolver in the database, and
+# --doh fails fast if ANY of them has no DoH URL. Narrow with --category,
+# or supply --doh-url, if you hit that.
 net-benchmark dns top --doh --limit 5
 
 # DOT rank top resolvers
@@ -280,12 +333,12 @@ net-benchmark dns benchmark --use-defaults --doh --dot
 # ERROR: --doh and --dot are mutually exclusive.
 
 # --doh-url count must match --resolvers count
-net-benchmark dns benchmark --resolvers "Cloudflare,Google" --doh \
+net-benchmark dns benchmark --resolvers "Cloudflare,Google" --domains "bing.com,google.com" --doh \
   --doh-url "https://cloudflare-dns.com/dns-query"
 # ERROR: --doh-url has 1 URL(s) but --resolvers has 2 resolver(s). Counts must match.
 
 # Custom IP with --doh requires --doh-url
-net-benchmark dns benchmark --resolvers "192.168.1.1" --doh
+net-benchmark dns benchmark --resolvers "192.168.1.1" --domains "google.com" --doh
 # ERROR: --doh requires a DoH URL for: 192.168.1.1. Use --doh-url to supply them explicitly.
 ```
 
@@ -368,9 +421,11 @@ net-benchmark dns benchmark \
 # Validate DNS migration
 net-benchmark dns benchmark \
   --resolvers old-provider.json,new-provider.json \
-  --zone-transfer \ # coming soon
+  --domains business-domains.txt \
   --output migration-report/ \
   --formats pdf,excel
+# Zone-transfer (AXFR/IXFR) validation is not implemented yet — see
+# "Advanced Capabilities" above.
 ```
 
 </details>
@@ -393,7 +448,6 @@ net-benchmark dns benchmark \
 # Detailed analysis
 net-benchmark dns benchmark \
   --use-defaults \
-  --formats csv,excel \
   --domain-stats \
   --record-type-stats \
   --error-breakdown \
@@ -451,9 +505,10 @@ net-benchmark dns benchmark \
 
 ```bash
 # Test new DNS provider before switching
+# (--use-defaults would OVERRIDE --resolvers, so pass --domains instead)
 net-benchmark dns benchmark \
   --resolvers current-dns.json,new-dns.json \
-  --use-defaults \
+  --domains business-domains.txt \
   --dnssec-validate \
   --output migration-report/ \
   --formats csv,excel
@@ -467,10 +522,10 @@ net-benchmark dns benchmark \
 
 ```bash
 # Compare Pi-hole against public resolvers
-net-benchmark dns compare \
-  --resolvers pihole.local,1.1.1.1,8.8.8.8,9.9.9.9 \
+# (resolvers are POSITIONAL arguments, not a --resolvers option)
+net-benchmark dns compare pihole.local 1.1.1.1 8.8.8.8 9.9.9.9 \
   --domains common-sites.txt \
-  --rounds 10
+  --iterations 10
 ```
 
 **Result:** Data-driven proof your self-hosted DNS is faster (or not!)
@@ -1067,7 +1122,7 @@ net-benchmark dns benchmark \
 ```bash
 # Command not found
 pip install -e .
-python -m net_benchmark.dns_benchmark.cli --help
+net-benchmark dns --help
 
 # PDF generation fails (Ubuntu/Debian) – see [PDF dependencies](#pdf-dependencies)
 sudo apt-get install libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
@@ -1084,7 +1139,7 @@ net-benchmark dns benchmark --use-defaults --max-concurrent 25
 
 ```bash
 # Verbose run
-python -m net_benchmark.dns_benchmark.cli benchmark --use-defaults --formats csv
+net-benchmark dns benchmark --use-defaults --formats csv
 
 # Minimal configuration
 net-benchmark dns benchmark --resolvers "1.1.1.1" --domains "google.com" --formats csv
@@ -1159,6 +1214,10 @@ Place images in `src/net_benchmark/dns_benchmark/docs/screenshots/`:
 ```bash
 net-benchmark dns --help
 net-benchmark dns benchmark --help
+net-benchmark dns top --help
+net-benchmark dns compare --help
+net-benchmark dns monitoring --help
+net-benchmark dns list-defaults --help
 net-benchmark dns list-resolvers --help
 net-benchmark dns list-domains --help
 net-benchmark dns list-categories --help
@@ -1174,7 +1233,7 @@ net-benchmark dns benchmark --use-defaults
 
 # Test specific resolvers
 net-benchmark dns list-resolvers --category security
-net-benchmark dns benchmark --resolvers data/security_resolvers.json --use-defaults
+net-benchmark dns benchmark --resolvers data/security_resolvers.json --domains data/domains.txt
 
 # Generate a management report
 net-benchmark dns benchmark --use-defaults --formats excel,pdf \
@@ -1312,14 +1371,15 @@ net-benchmark http benchmark --use-defaults --iterations 5   # meaningful jitter
 | Command | What it does | Quick example |
 |---|---|---|
 | `benchmark` | Full HTTP benchmark with exports | `net-benchmark http benchmark --use-defaults` |
-| `top` | Rank all targets by speed | `net-benchmark http top --limit 5` |
+| `top` | Rank targets by speed | `net-benchmark http top --use-defaults --limit 5` |
 | `compare` | Side‑by‑side target comparison | `net-benchmark http compare api.example.com api2.example.com` |
 | `monitoring` | Continuous monitoring with alerts | `net-benchmark http monitoring --use-defaults` |
 | `load-test` | Sustained load test with configurable traffic shaping | `net-benchmark http load-test -t https://api.example.com --mode throughput --duration 30` |
+| `merge-load-test` | Merge worker summaries from a distributed run | `net-benchmark http merge-load-test ./nodes/*.json -o ./merged` |
 
 ```bash
 # Find your fastest endpoint right now
-net-benchmark http top --limit 5
+net-benchmark http top --use-defaults --limit 5
 
 # Compare two APIs side‑by‑side
 net-benchmark http compare api.example.com api2.example.com --iterations 3 --show-details
@@ -1436,11 +1496,12 @@ net-benchmark http benchmark \
   --targets https://mtls.example.com \
   --cert client.pem --cert-key client-key.pem
 
-# Proxy with auth
+# Proxy with credentials
+# (--auth authenticates to the ORIGIN, not the proxy — put proxy
+#  credentials in the proxy URL itself)
 net-benchmark http benchmark \
   --targets https://example.com \
-  --proxy http://proxy:8080 \
-  --auth "basic:proxyuser:proxypass"
+  --proxy http://proxyuser:proxypass@proxy:8080
 ```
 
 ---
@@ -1658,12 +1719,16 @@ net-benchmark http monitoring \
   --alert-failure-rate 5 \
   --output ./monitoring_logs
 
-# Monitor behind a proxy
+# Page only on unreachable origins, not on a legitimate 403
 net-benchmark http monitoring \
   --targets https://internal-api.example.com \
-  --proxy http://proxy:8080 \
+  --expected-status 200,403 \
+  --alert-transport-error-rate 5 \
   --interval 60
 ```
+
+> `http monitoring` has no `--proxy`. Proxy support lives on `http benchmark`
+> and `http compare`.
 
 ---
 
@@ -1673,6 +1738,12 @@ net-benchmark http monitoring \
 HTTP targets using three load-shaping strategies. Unlike `benchmark`
 (fixed iteration count), load-test runs for a duration and reports
 achieved throughput, latency percentiles, and connection-level behavior.
+
+Since **0.5.2** the load can also be generated from several parallel workers —
+separate processes on one machine, or separate machines entirely — with a
+synchronised start and a statistically correct merge.
+
+> Full reference: **[HTTP Load Testing](https://net-benchmark.readthedocs.io/en/latest/http-load-test.html)**
 
 ##### Modes
 
@@ -1702,7 +1773,6 @@ net-benchmark http load-test \
   --mode sustained \
   --rps 150 \
   --duration 300 \
-  --enable-connection-reuse \
   --formats csv,excel,json
 ```
 `--rps` is required in sustained mode — the CLI fails fast with a clear
@@ -1742,18 +1812,136 @@ timeline sheets.
 net-benchmark http load-test \
   -t https://cdn.example.com/asset.js \
   --mode throughput --duration 60 --max-concurrency 200 \
-  --enable-connection-reuse --enable-tls-resumption --enable-push-detection \
+  --enable-tls-resumption --enable-push-detection \
   --formats json
 ```
-These detection features are opt-in — they add per-request bookkeeping,
-so only turn them on when you're actually investigating connection
-reuse / TLS resumption / HTTP/2 push behavior.
+Connection reuse is always tracked and needs no flag —
+`--enable-connection-reuse` is deprecated and has no effect. The other two
+detections are opt-in, because they add per-request bookkeeping: turn them
+on only when you're actually investigating TLS resumption or HTTP/2 push
+behavior.
+
+##### Reading the results
+
+| Metric | Meaning |
+|---|---|
+| **Achieved RPS** | Requests that *completed*, over the run window. Asked for 400 and got 180 means the target could not keep up. |
+| **Avg blocked** | Waiting for a free connection slot. **Your** side. |
+| **Avg waiting** | Waiting for the server to respond. **Their** side. |
+
+`blocked` rising while `waiting` stays flat is the most useful signal in the
+output: you are measuring your own generator rather than the target. That is
+what `--workers` exists to fix.
+
+##### Distributed load generation (0.5.2)
+
+A single Python process — one GIL, one event loop, one connection pool — is
+often the bottleneck long before the target is. `--workers` generates the load
+from N **separate processes**, started against a shared wall-clock barrier and
+merged at the end.
+
+```bash
+# Baseline: one process.
+net-benchmark http load-test -t https://api.example.com/health \
+  --mode throughput --duration 20 --max-concurrency 50
+
+# Four processes. --max-concurrency is PER WORKER: 200 in flight overall.
+net-benchmark http load-test -t https://api.example.com/health \
+  --mode throughput --duration 20 --max-concurrency 50 --workers 4
+```
+
+Expect a ~5s pause before requests begin — the start barrier, sized so every
+spawned interpreter has finished importing before the run starts.
+
+- RPS scales with worker count, `blocked` flat → the single process was the
+  ceiling, and you removed it.
+- RPS flat, `waiting` climbs → the target is saturated. A result, not a failure.
+- RPS flat, `blocked` climbs → a machine limit (NIC, CPU, ports). Processes
+  escape the GIL, not the network card.
+
+**Rate splitting.** `--rps` is the run **total** and is divided across workers:
+
+```bash
+# 4 workers pace 100 RPS each; the merged summary reports 400.
+net-benchmark http load-test -t https://api.example.com/cart \
+  --mode sustained --rps 400 --duration 30 --workers 4 --max-backlog 20
+```
+
+**Target topologies.** With several targets, `--target-distribution` decides
+what `--workers` multiplies — and changes what `--rps` means:
+
+| Value | Behaviour | `--rps` is | Use when |
+|---|---|---|---|
+| `replicate` (default) | Every worker runs every target | run **total**, split | Saturating one origin |
+| `shard` | Targets dealt round-robin, one worker each | **per target**, not divided | Measuring more targets in parallel |
+
+##### Across several machines (0.5.2)
+
+Multi-process generation removes the GIL and the single event loop. It does not
+remove the NIC, or the fact that all traffic comes from one place. For traffic
+genuinely arriving from several regions, run a node per region against a shared
+barrier and merge.
+
+```bash
+# 1. Pick the barrier — prints the epoch to paste onto every node.
+net-benchmark http load-test -t https://example.com \
+  --duration 60 --start-delay 120 --quiet
+# [i]   Start barrier: 1754320000.000 (epoch seconds, UTC)
+
+# 2. Every node: IDENTICAL --start-at, its own labels and rate share.
+net-benchmark http load-test -t https://example.com \
+  --mode sustained --rps 250 --duration 60 \
+  --start-at 1754320000.000 --warmup 10 \
+  --worker-id hel1 --region eu-north \
+  --emit-summary hel1.json --formats csv
+
+# 3. Collect and merge.
+net-benchmark http merge-load-test ./nodes/*.json \
+  -o ./merged --threshold 'p95_latency<500'
+```
+
+Percentiles are recomputed from the merged latency histogram. Averaging several
+nodes' P95 values does not give the P95 of their union — it is a different
+number, not an approximation.
+
+The per-node run still writes its own local exports; `--formats` on `load-test`
+takes at least one format and cannot be emptied. The file that matters for the
+merge is the one named by `--emit-summary` — keep the node's `--formats` narrow
+(`csv`) rather than trying to switch exports off.
+
+`--warmup` opens connections *before* the barrier: without it a synchronised
+start is a synchronised cold start and the opening seconds measure TLS
+handshakes. Where clock offset has been measured, the merge refuses beyond 50 ms
+of skew — nodes agreeing on an epoch only proves they were *told* the same
+value.
+
+##### Pass/fail thresholds (CI)
+
+Parsed *before* the run starts, including the metric name, so a typo costs a
+second rather than a full load test. Any failure exits non-zero.
+
+```bash
+net-benchmark http load-test \
+  -t https://staging.example.com/api/health \
+  --mode sustained --rps 200 --duration 60 \
+  --workers 4 --max-backlog 50 --warmup 10 \
+  --expected-status 200,404 \
+  --threshold 'p95_latency<400' \
+  --threshold 'success_rate>99.5' \
+  --threshold 'dropped_rate<1'
+```
+
+Percentiles survive a merge. Dispersion and phase-timing metrics
+(`std_latency`, `jitter`, `consistency_score`, `p95_ttfb_ms`,
+`p95_duration_ms`, `p95_blocked_ms`, `p95_waiting_ms`) do not, and are
+**rejected on a merged run** rather than passing against a structural zero.
+They stay exact at `--workers 1` and per worker in `*_workers.csv`.
 
 ##### Output formats
 
 | Format  | Contents                                                     |
 |---------|----------------------------------------------------------------|
-| `csv`   | Raw results, summary, per-second timeline, error breakdown    |
+| `csv`   | Raw results, summary, per-worker summary, per-interval timeline, error breakdown, latency histogram |
 | `excel` | Comparison sheet + per-target raw/timeline sheets, optional charts |
 | `pdf`   | Report with charts (requires `pip install net-benchmark[pdf]`) |
 | `json`  | Full structured bundle, all targets                            |
@@ -1761,6 +1949,21 @@ reuse / TLS resumption / HTTP/2 push behavior.
 > **Note:** PDF export fails soft — if `weasyprint` isn't installed, the
 > run still completes and other formats are still written; check the CLI
 > output for `PDF export failed`.
+
+##### Limits and gotchas
+
+- **Concurrency flags are per worker.** `--workers 4 --max-concurrency 50` is
+  200 in flight; so are `--max-backlog` and `--max-total-rps`. `--rps` is the
+  exception under `replicate`.
+- **Raw per-request rows do not survive `--workers > 1`.** `*_raw.csv` and the
+  per-target Excel sheets are empty regardless of `--no-retain-results`. Every
+  statistic, interval and histogram survives.
+- **`--live` is single-worker only.** The callback cannot be sent into a spawned
+  process; above one worker the CLI warns rather than silently printing nothing.
+- **Workers that will be merged must agree on `--interval-bucket`.** Mismatched
+  widths are refused.
+- **A dead worker means load that was never offered.** Failures are reported per
+  target rather than folded into the merged summary.
 
 ---
 
@@ -1798,7 +2001,7 @@ reuse / TLS resumption / HTTP/2 push behavior.
 ```bash
 # Command not found
 pip install -e .
-python -m net_benchmark.http_bench.cli --help
+net-benchmark http --help
 
 # PDF generation fails (Ubuntu/Debian) – see PDF dependencies
 sudo apt-get install libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
@@ -1825,6 +2028,7 @@ net-benchmark http top --help
 net-benchmark http compare --help
 net-benchmark http monitoring --help
 net-benchmark http load-test --help
+net-benchmark http merge-load-test --help
 ```
 
 Common scenarios:
