@@ -34,7 +34,7 @@ dependencies = [
     "tqdm>=4.66,<5.0",           
     "matplotlib>=3.8,<4.0",
     "pillow>=11.0.0,<12.0.0",
-    "cryptography>=42.0,<45.0",
+    "cryptography>=42.0,<50.0",
 ]
 
 classifiers = [
