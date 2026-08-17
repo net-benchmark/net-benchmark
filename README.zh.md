@@ -1722,7 +1722,7 @@ net-benchmark http monitoring \
 自 **0.5.2** 起，负载还可由多个并行 worker 生成——同一台机器上的多个进程，或多台
 不同的机器——它们同步启动，并在结束时进行统计学上正确的合并。
 
-> 完整参考：**[HTTP 负载测试](https://net-benchmark.readthedocs.io/en/latest/http-load-test.html)**
+> 完整参考：**[HTTP 负载测试](https://net-benchmark.readthedocs.io/en/latest/guides/http-load-test.html)**
 
 ##### 模式
 
