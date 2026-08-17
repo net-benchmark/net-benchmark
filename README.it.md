@@ -1745,7 +1745,7 @@ Dalla **0.5.2** il carico può essere generato anche da più worker paralleli �
 processi separati sulla stessa macchina, o macchine del tutto distinte — con
 avvio sincronizzato e unione statisticamente corretta.
 
-> Riferimento completo: **[HTTP Load Testing](https://net-benchmark.readthedocs.io/en/latest/http-load-test.html)**
+> Riferimento completo: **[HTTP Load Testing](https://net-benchmark.readthedocs.io/en/latest/it/http-load-test.html)**
 
 ##### Modalità
 
@@ -2300,7 +2300,7 @@ net-benchmark dns generate-config \
 
 ### Ufficiali
 
-- **Documentazione**: [net-benchmark](https://net-benchmark.readthedocs.io/en/latest/)
+- **Documentazione**: [net-benchmark](https://net-benchmark.readthedocs.io/en/latest/it/index.html)
 
 - **GitHub**: [net-benchmark/net-benchmark](https://github.com/net-benchmark/net-benchmark)
 

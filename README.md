@@ -1743,7 +1743,7 @@ Since **0.5.2** the load can also be generated from several parallel workers —
 separate processes on one machine, or separate machines entirely — with a
 synchronised start and a statistically correct merge.
 
-> Full reference: **[HTTP Load Testing](https://net-benchmark.readthedocs.io/en/latest/http-load-test.html)**
+> Full reference: **[HTTP Load Testing](https://net-benchmark.readthedocs.io/en/latest/guides/http-load-test.html)**
 
 ##### Modes
 

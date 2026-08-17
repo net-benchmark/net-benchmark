@@ -1,6 +1,6 @@
 # Release Process
 
-This document describes how releases are managed for `dns-benchmark-tool`.
+This document describes how releases are managed for `net-benchmark`.
 
 ---
 
