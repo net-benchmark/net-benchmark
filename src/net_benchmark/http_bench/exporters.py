@@ -89,7 +89,7 @@ class HTTPExportBundle:
             "error_stats": analyzer.get_error_statistics(),
             "raw_results": [r.to_dict() for r in results],
         }
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str)
 
 

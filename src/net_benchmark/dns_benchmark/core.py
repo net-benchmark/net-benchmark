@@ -1549,7 +1549,7 @@ class ResolverManager:
     @staticmethod
     def load_resolvers_from_file(file_path: str) -> List[Dict[str, str]]:
         """Load resolvers from JSON file."""
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             data: Dict[str, Any] = json.load(f)
         return cast(List[Dict[str, str]], data.get("resolvers", []))
 
@@ -2137,7 +2137,7 @@ class DomainManager:
     @staticmethod
     def load_domains_from_file(file_path: str) -> List[str]:
         """Load domains from text file (one per line)."""
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             domains = [
                 line.strip() for line in f if line.strip() and not line.startswith("#")
             ]

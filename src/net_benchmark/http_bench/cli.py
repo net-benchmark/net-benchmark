@@ -1037,7 +1037,7 @@ def monitoring(
                 output_path
                 / f"http_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             )
-            with open(snapshot_path, "w") as f:
+            with open(snapshot_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {"timestamp": datetime.now().isoformat(), "overall": overall},
                     f,
@@ -1361,12 +1361,12 @@ def compare(
                         for s in target_stats
                     ],
                 }
-                with open(output_path, "w") as f:
+                with open(output_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
             elif ext == ".csv":
                 HTTPCSVExporter.export_summary_statistics(analyzer, str(output_path))
             else:  # .txt
-                with open(output_path, "w") as f:
+                with open(output_path, "w", encoding="utf-8") as f:
                     f.write("HTTP Target Comparison\n")
                     f.write(
                         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"

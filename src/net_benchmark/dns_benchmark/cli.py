@@ -709,13 +709,13 @@ def top(
                         for i, (name, stats, score) in enumerate(top_resolvers)
                     ],
                 }
-                with open(output_path, "w") as f:
+                with open(output_path, "w", encoding="utf-8") as f:
                     json.dump(export_data, f, indent=2)
 
             elif ext == ".csv":
                 import csv
 
-                with open(output_path, "w", newline="") as f:
+                with open(output_path, "w", encoding="utf-8", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow(
                         [
@@ -744,7 +744,7 @@ def top(
                         )
 
             else:  # .txt or default
-                with open(output_path, "w") as f:
+                with open(output_path, "w", encoding="utf-8") as f:
                     f.write(f"Top {len(top_resolvers)} DNS Resolvers (by {metric})\n")
                     f.write(
                         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -1068,7 +1068,7 @@ def compare(
                         for name, stats in resolver_stats.items()
                     ],
                 }
-                with open(output_path, "w") as f:
+                with open(output_path, "w", encoding="utf-8") as f:
                     json.dump(export_data, f, indent=2)
             else:
                 CSVExporter.export_summary_statistics(analyzer, str(output_path))
@@ -1210,7 +1210,7 @@ def monitoring(
 
     log_file = None
     if output:
-        log_file = open(output, "a")
+        log_file = open(output, "a", encoding="utf-8")
         log_file.write(f"\n{'=' * 60}\n")
         log_file.write(
             f"Monitoring started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -1642,7 +1642,7 @@ settings:
 
     if output:
         try:
-            with open(output, "w") as f:
+            with open(output, "w", encoding="utf-8") as f:
                 f.write(config_yaml)
             click.echo(success(f"Configuration saved to: {output}"))
         except Exception as e:
