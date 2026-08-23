@@ -295,7 +295,7 @@ def test_benchmark_exports_csv_excel_pdf_json(tmp_path, sample_results):
         pytest.skip("weasyprint not installed; skipping PDF export check")
 
     # Validate JSON structure
-    data = json.loads(Path(json_path).read_text())
+    data = json.loads(Path(json_path).read_text(encoding="utf-8"))
     assert "overall" in data
     assert isinstance(data["resolver_stats"], list)
     assert isinstance(data["raw_results"], list)

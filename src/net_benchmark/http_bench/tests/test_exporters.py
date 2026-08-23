@@ -64,7 +64,7 @@ class TestJSONExport:
         assert os.path.exists(path)
         import json
 
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         assert "overall" in data
         assert "target_stats" in data
