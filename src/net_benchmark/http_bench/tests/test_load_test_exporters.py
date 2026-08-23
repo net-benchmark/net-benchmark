@@ -161,7 +161,7 @@ class TestExportBundle:
         path = tmp_path / "bundle.json"
         LoadTestExportBundle.export_json(summaries, str(path))
         assert path.exists()
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         assert len(data["targets"]) == 2
         assert data["targets"][0]["target"] == "https://a.com"
@@ -172,7 +172,7 @@ class TestExportBundle:
     def test_export_json_round_trips_enums(self, tmp_path, summary_a):
         path = tmp_path / "bundle.json"
         LoadTestExportBundle.export_json([summary_a], str(path))
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             json.load(f)  # no exception
 
 
@@ -216,7 +216,7 @@ class TestCSVExporter:
         # Exporting an empty intervals list produces an empty CSV with no columns.
         # Check that the file was created and has no data (or minimal header).
         assert os.path.exists(path)
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             content = f.read().strip()
         # Either empty or just a header line without data.
         assert content == "" or content == "target,window_index,..."  # adjust as needed
