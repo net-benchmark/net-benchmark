@@ -63,7 +63,7 @@ class ExportBundle:
             "record_type_stats": record_type_stats,
             "error_stats": error_stats,
         }
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             import json
 
             json.dump(payload, f, indent=2)

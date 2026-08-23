@@ -296,7 +296,7 @@ class LoadTestExportBundle:
             "combined_error_breakdown": combined_error_breakdown(summaries),
             "generated_at": datetime.now().isoformat(),
         }
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str)
 
 
