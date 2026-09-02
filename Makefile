@@ -1,7 +1,7 @@
-.PHONY: install install-dev install-pdf uninstall mypy black isort flake8 cov test clean cli-test \
-    gpg-check release-patch release-minor release-major release-tag release-tag-dry \
-    release-check release-flow release-clean release-build release-info release-status cz-commit cz-changelog cz-bump
-
+.PHONY: install install-dev install-pdf uninstall mypy black black-check isort isort-check flake8 cov test clean cli-test \
+     gpg-check release-patch release-minor release-major release-tag release-tag-dry \
+     release-check release-flow release-clean release-build release-info release-status cz-commit cz-changelog cz-bump
+ 
 PIP=pip
 
 # 🔧 Install package (runtime only)
@@ -23,23 +23,28 @@ uninstall:
     mypy black flake8 autopep8 pytest coverage isort
 
 mypy:
-	mypy .
+	mypy
 
 isort:
-	isort .
+	isort
+
+isort-check:
+	isort --check-only .
 
 black:
 	black .
 
-flake8:
-	flake8 src --ignore=E126,E501,E712,F405,F403,E266,W503 --max-line-length=88 --extend-ignore=E203
+black-check:
+	black --check .
 
+flake8:
+	flake8 src
 cov:
 	coverage erase
 	coverage run --source=src -m pytest -vv -s
 	coverage html
 
-test: mypy black isort flake8 cov
+test: mypy black-check isort-check flake8 cov
 
 clean:
 	rm -rf __pycache__ .pytest_cache .mypy_cache htmlcov .coverage coverage.xml \
