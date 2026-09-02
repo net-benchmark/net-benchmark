@@ -1,3 +1,10 @@
+## v0.5.4 (2026-09-02)
+
+### Fix
+
+- add explicit encoding="utf-8" to file I/O in tests
+- add explicit encoding="utf-8" to all file I/O in production code
+
 ## v0.5.3 (2026-09-02)
 
 ### BREAKING CHANGE
