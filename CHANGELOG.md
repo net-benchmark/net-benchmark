@@ -1,3 +1,19 @@
+## v0.5.3 (2026-09-02)
+
+### BREAKING CHANGE
+
+- BREAKING CHANGE: Python 3.9 and 3.10 are no longer supported.
+
+### Feat
+
+- drop Python 3.9/3.10 support, require Python >=3.11
+
+### Fix
+
+- **ci**: add missing .flake8 config file
+- **ci**: make black/isort actual gates in make test
+- **ci**: stop mypy.ini/pytest.ini from silently overriding pyproject.toml
+
 ## v0.5.2 (2026-08-15)
 
 ### Feat
