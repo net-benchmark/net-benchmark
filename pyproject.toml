@@ -14,7 +14,7 @@ maintainers = [
     { name = "Joseph Oseh Frank" }
 ] 
 license = { text = "MIT" }
-requires-python = ">=3.9,<3.13"
+requires-python = ">=3.11"
 keywords = [
     "dns", "benchmark", "performance", "dnssec", "doh", "dot",
     "networking", "latency", "resolver", "metrics",
@@ -34,7 +34,7 @@ dependencies = [
     "tqdm>=4.66,<5.0",           
     "matplotlib>=3.8,<4.0",
     "pillow>=11.0.0,<12.0.0",
-    "cryptography>=42.0,<45.0",
+    "cryptography>=44.0,<51.0",
 ]
 
 classifiers = [
@@ -48,10 +48,10 @@ classifiers = [
     "Operating System :: OS Independent",
     "Typing :: Typed",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12"
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14"
 ]
 
 [project.urls]
@@ -95,17 +95,15 @@ dns-benchmark = "net_benchmark.dns_benchmark.cli:cli"  # backward compat
 # Tool configurations
 # -------------------
 
-[tool.flake8]
-exclude = [".venv", ".eggs", "*.egg", "tests/*"]
-
 [tool.mypy]
 files = ["src"]
+exclude = "tests/"
 ignore_missing_imports = true
 strict = true
 
 [tool.black]
 line-length = 88
-target-version = ["py39", "py310", "py311", "py312"]
+target-version = ["py311", "py312", "py313", "py314"]
 
 [tool.isort]
 profile = "black"
@@ -116,12 +114,20 @@ force_grid_wrap = 0
 combine_as_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+minversion = "6.0"
+addopts = "-ra -q"
+asyncio_mode = "auto"
+testpaths = ["src"]
 pythonpath = ["src"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 python_classes = ["Test*"]
-addopts = "-ra -q"
+filterwarnings = [
+    "ignore:.*datetime\\.datetime\\.utcnow.*:DeprecationWarning",
+]
+markers = [
+    "cli: marks tests that run the full CLI smoke suite",
+]
 
 [tool.commitizen]
 name = "cz_conventional_commits"

@@ -101,7 +101,7 @@ pip install net-benchmark[pdf]     # with pdf export
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.11+
 - pip package manager
 
 ### Install from Source
