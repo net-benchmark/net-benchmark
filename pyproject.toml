@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "net-benchmark"
-version = "0.5.3"
+version = "0.5.4"
 description = "Network benchmarking suite for DNS, HTTP, and SSL — with DNSSEC validation, DoH/DoT support, high‑concurrency testing, and enterprise‑grade reporting."
 readme = { file = "README-pypi.md", content-type = "text/markdown" }
 authors = [
@@ -131,7 +131,7 @@ markers = [
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.5.3"
+version = "0.5.4"
 tag_format = "v$version"
 version_files = [
     "pyproject.toml:version",
