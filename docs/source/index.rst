@@ -80,6 +80,7 @@ net-benchmark
 
    guides/export-formats
    guides/configuration-files
+   guides/docker
    guides/automation-ci
 
 .. toctree::
