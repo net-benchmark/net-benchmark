@@ -1,3 +1,13 @@
+## v0.5.5 (2026-09-03)
+
+### Feat
+
+- docker image, build workflow, and k8s manifests
+
+### Fix
+
+- lift pillow cap to <13.0.0, resolves 13 HIGH + 5 MEDIUM CVEs
+
 ## v0.5.4 (2026-09-02)
 
 ### Fix
