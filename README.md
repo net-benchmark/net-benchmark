@@ -14,6 +14,7 @@ fast, extensible network benchmarking — dns, http, and ssl from a single cli.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
+[![Docker Pulls](https://img.shields.io/docker/pulls/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
 [![Docs](https://readthedocs.org/projects/net-benchmark/badge/?version=latest)](https://net-benchmark.readthedocs.io/en/latest/)
 [![Discussions](https://img.shields.io/github/discussions/net-benchmark/net-benchmark)](https://github.com/net-benchmark/net-benchmark/discussions)
 [![PyPI - Wheel](https://img.shields.io/pypi/wheel/net-benchmark)](https://pypi.org/project/net-benchmark)
@@ -97,6 +98,12 @@ codes via `--expected-status`.
 ```bash
 pip install net-benchmark          # core
 pip install net-benchmark[pdf]     # with pdf export
+```
+
+Or run it in Docker, no local Python needed — see [Running in Docker](https://net-benchmark.readthedocs.io/en/latest/guides/automation-ci.html#running-in-docker):
+
+```bash
+docker run --rm joeovo/net-benchmark:latest http benchmark --use-defaults --formats csv,excel
 ```
 
 ### Requirements
