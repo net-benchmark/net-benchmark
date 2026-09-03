@@ -66,7 +66,7 @@ pdf = ["weasyprint>=66.0,<67.0"]
 websocket = ["aiohttp>=3.8,<4.0"]
 
 dev = [
-    "mypy>=1.8,<2.0",
+    "mypy>=1.8,<3.0",
     "black>=24.0,<26.0",
     "flake8>=7.0,<8.0",
     "autopep8>=2.0,<3.0",
