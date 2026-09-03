@@ -26,7 +26,7 @@ on:
         type: boolean
 
 env:
-  DOCKERHUB_IMAGE: net-benchmark/net-benchmark
+  DOCKERHUB_IMAGE: joeovo/net-benchmark
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
@@ -49,18 +49,20 @@ jobs:
       # event. This image installs from PyPI, not repo source, on purpose
       # (see Dockerfile comments), so it has to wait for the real thing to
       # exist rather than race it.
-      - name: Wait for the version to actually be live on PyPI
+      - name: Wait for the version to actually be installable from PyPI
         run: |
           V="${{ steps.version.outputs.version }}"
+          python3 -m venv /tmp/pypi-check
           for i in $(seq 1 30); do
-            if curl -fs "https://pypi.org/pypi/net-benchmark/${V}/json" >/dev/null; then
-              echo "net-benchmark==${V} is live on PyPI"
+            if /tmp/pypi-check/bin/pip download --no-deps --dest /tmp/pypi-check-dl \
+                "net-benchmark==${V}" >/dev/null 2>&1; then
+              echo "net-benchmark==${V} is installable from PyPI"
               exit 0
             fi
-            echo "waiting for net-benchmark==${V} on PyPI (attempt $i/30)..."
+            echo "not yet installable (attempt $i/30) — PyPI's JSON API can go green before its package index catches up, so this checks the real thing pip install will do..."
             sleep 20
           done
-          echo "::error::net-benchmark==${V} never appeared on PyPI after 10 minutes"
+          echo "::error::net-benchmark==${V} was still not installable after 10 minutes"
           exit 1
 
   build-amd64:
@@ -164,13 +166,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        registry_image: ["net-benchmark/net-benchmark", "ghcr.io/net-benchmark/net-benchmark"]
+        registry_image: ["joeovo/net-benchmark", "ghcr.io/net-benchmark/net-benchmark"]
         variant: [{ suffix: "", target: "final-lean" }, { suffix: "-pdf", target: "final-pdf" }]
     steps:
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        if: startsWith(matrix.registry_image, 'net-benchmark/')
+        if: startsWith(matrix.registry_image, 'joeovo/')
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
