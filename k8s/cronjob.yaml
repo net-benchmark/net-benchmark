@@ -1,0 +1,73 @@
+# Recurring benchmark — the in-cluster equivalent of the host-cron examples
+# in docs/source/guides/automation-ci.md. Results land in emptyDir and are
+# gone when the pod is cleaned up; if you want history, mount a PVC at
+# /work instead, or add a step that ships /work/results somewhere external
+# before the container exits.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: net-benchmark-targets
+data:
+  targets.txt: |
+    https://api.example.com/health
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: net-benchmark-hourly
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: net-benchmark
+              image: net-benchmark/net-benchmark:latest
+              args:
+                - http
+                - benchmark
+                - --targets=/config/targets.txt
+                - --formats=csv
+                - --output=/work/results
+                - --quiet
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1"
+                  memory: "512Mi"
+              volumeMounts:
+                - name: targets
+                  mountPath: /config
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: targets
+              configMap:
+                name: net-benchmark-targets
+            - name: work
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}

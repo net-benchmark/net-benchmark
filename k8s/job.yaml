@@ -1,0 +1,69 @@
+# One-shot benchmark run, gated on --threshold. Use this as a pre-deploy
+# check: `kubectl apply -f job.yaml && kubectl wait --for=condition=complete
+# --timeout=300s job/net-benchmark-run`, then check the Job's status — a
+# failed threshold means the container exited non-zero, which Kubernetes
+# reports as the Job failing, same contract as `docker run`'s exit code.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: net-benchmark-targets
+data:
+  targets.txt: |
+    https://api.example.com/health
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: net-benchmark-run
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: net-benchmark
+          image: net-benchmark/net-benchmark:latest
+          args:
+            - http
+            - benchmark
+            - --targets=/config/targets.txt
+            - --threshold=success_rate>=99
+            - --threshold=p95_latency<1000
+            - --formats=csv
+            - --output=/work/results
+            - --quiet
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          volumeMounts:
+            - name: targets
+              mountPath: /config
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: targets
+          configMap:
+            name: net-benchmark-targets
+        - name: work
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

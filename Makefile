@@ -1,6 +1,7 @@
 .PHONY: install install-dev install-pdf uninstall mypy black black-check isort isort-check flake8 cov test clean cli-test \
-     gpg-check release-patch release-minor release-major release-tag release-tag-dry \
-     release-check release-flow release-clean release-build release-info release-status cz-commit cz-changelog cz-bump
+    docker-version docker-build docker-build-pdf docker-smoke \
+    gpg-check release-patch release-minor release-major release-tag release-tag-dry \
+    release-check release-flow release-clean release-build release-info release-status cz-commit cz-changelog cz-bump
  
 PIP=pip
 
@@ -170,3 +171,28 @@ cz-bump:
 		echo "❌ Usage: make cz-bump INCREMENT=patch|minor|major"; exit 1; \
 	fi
 	cz bump --changelog --increment $(INCREMENT)
+
+# --- Docker ---------------------------------------------------------------
+# Version comes from src/net_benchmark/__init__.py, the same source of truth
+# commitizen bumps — never hardcoded, so a local build can't drift from the
+# release it claims to be.
+NB_VERSION := $(shell python -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/net_benchmark/__init__.py').read_text()).group(1))")
+
+docker-version:
+	@echo $(NB_VERSION)
+
+docker-build:
+	docker build --target final-lean \
+		--build-arg NET_BENCHMARK_VERSION=$(NB_VERSION) \
+		-t net-benchmark:$(NB_VERSION) .
+
+docker-build-pdf:
+	docker build --target final-pdf \
+		--build-arg NET_BENCHMARK_VERSION=$(NB_VERSION) \
+		-t net-benchmark:$(NB_VERSION)-pdf .
+
+docker-smoke: docker-build
+	docker run --rm net-benchmark:$(NB_VERSION) --version
+	docker run --rm net-benchmark:$(NB_VERSION) http benchmark \
+		-t https://example.com -i 3 --quiet --threshold "p95_latency<5000"; \
+		echo "exit: $$?"

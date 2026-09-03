@@ -1,0 +1,204 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Manual trigger, for validating Docker Hub / ghcr wiring without cutting
+  # a release. Builds from any version already live on PyPI and pushes under
+  # a throwaway tag by default, so a botched test never lands on :latest or
+  # overwrites a real version tag.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "net-benchmark version already published on PyPI (e.g. 0.5.4)"
+        required: true
+        type: string
+      tag_suffix:
+        description: "Tag to push under. Leave as 'test' unless you mean to publish."
+        required: true
+        default: "test"
+        type: string
+      push:
+        description: "Actually push to registries (uncheck to build-only)"
+        required: true
+        default: false
+        type: boolean
+
+env:
+  DOCKERHUB_IMAGE: net-benchmark/net-benchmark
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  wait-for-pypi:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # pypi.yml triggers off this same tag push independently — GitHub gives
+      # no ordering guarantee between separate workflow files reacting to one
+      # event. This image installs from PyPI, not repo source, on purpose
+      # (see Dockerfile comments), so it has to wait for the real thing to
+      # exist rather than race it.
+      - name: Wait for the version to actually be live on PyPI
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          for i in $(seq 1 30); do
+            if curl -fs "https://pypi.org/pypi/net-benchmark/${V}/json" >/dev/null; then
+              echo "net-benchmark==${V} is live on PyPI"
+              exit 0
+            fi
+            echo "waiting for net-benchmark==${V} on PyPI (attempt $i/30)..."
+            sleep 20
+          done
+          echo "::error::net-benchmark==${V} never appeared on PyPI after 10 minutes"
+          exit 1
+
+  build-amd64:
+    needs: wait-for-pypi
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [final-lean, final-pdf]
+    outputs:
+      lean_digest: ${{ steps.digest.outputs.lean_digest }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set tag suffix
+        id: tag
+        run: |
+          if [ "${{ matrix.target }}" = "final-pdf" ]; then
+            echo "suffix=-pdf" >> "$GITHUB_OUTPUT"
+          else
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+          build-args: |
+            NET_BENCHMARK_VERSION=${{ needs.wait-for-pypi.outputs.version }}
+          tags: |
+            ${{ env.DOCKERHUB_IMAGE }}:${{ needs.wait-for-pypi.outputs.version }}${{ steps.tag.outputs.suffix }}${{ github.event_name == 'workflow_dispatch' && format('-{0}', inputs.tag_suffix) || '' }}-amd64
+            ${{ env.GHCR_IMAGE }}:${{ needs.wait-for-pypi.outputs.version }}${{ steps.tag.outputs.suffix }}${{ github.event_name == 'workflow_dispatch' && format('-{0}', inputs.tag_suffix) || '' }}-amd64
+
+  build-arm64:
+    needs: wait-for-pypi
+    runs-on: ubuntu-latest
+    continue-on-error: true  # a wheel gap or emulation flake on this arch
+                              # must never block amd64 from shipping
+    strategy:
+      matrix:
+        target: [final-lean, final-pdf]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set tag suffix
+        id: tag
+        run: |
+          if [ "${{ matrix.target }}" = "final-pdf" ]; then
+            echo "suffix=-pdf" >> "$GITHUB_OUTPUT"
+          else
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/arm64
+          push: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
+          build-args: |
+            NET_BENCHMARK_VERSION=${{ needs.wait-for-pypi.outputs.version }}
+          tags: |
+            ${{ env.DOCKERHUB_IMAGE }}:${{ needs.wait-for-pypi.outputs.version }}${{ steps.tag.outputs.suffix }}${{ github.event_name == 'workflow_dispatch' && format('-{0}', inputs.tag_suffix) || '' }}-arm64
+            ${{ env.GHCR_IMAGE }}:${{ needs.wait-for-pypi.outputs.version }}${{ steps.tag.outputs.suffix }}${{ github.event_name == 'workflow_dispatch' && format('-{0}', inputs.tag_suffix) || '' }}-arm64
+
+  publish-manifest:
+    needs: [wait-for-pypi, build-amd64, build-arm64]
+    if: always() && needs.build-amd64.result == 'success' && github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        registry_image: ["net-benchmark/net-benchmark", "ghcr.io/net-benchmark/net-benchmark"]
+        variant: [{ suffix: "", target: "final-lean" }, { suffix: "-pdf", target: "final-pdf" }]
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: startsWith(matrix.registry_image, 'net-benchmark/')
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to ghcr.io
+        if: startsWith(matrix.registry_image, 'ghcr.io/')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble manifest (amd64 + arm64 if it landed, amd64 alone otherwise)
+        env:
+          V: ${{ needs.wait-for-pypi.outputs.version }}
+          SUFFIX: ${{ matrix.variant.suffix }}
+          IMG: ${{ matrix.registry_image }}
+          ARM_OK: ${{ needs.build-arm64.result == 'success' }}
+        run: |
+          SOURCES="${IMG}:${V}${SUFFIX}-amd64"
+          if [ "$ARM_OK" = "true" ]; then
+            SOURCES="$SOURCES ${IMG}:${V}${SUFFIX}-arm64"
+          else
+            echo "::warning::arm64 build did not succeed — publishing amd64-only manifest for ${IMG}:${V}${SUFFIX}"
+          fi
+          docker buildx imagetools create \
+            --tag "${IMG}:${V}${SUFFIX}" \
+            --tag "${IMG}:latest${SUFFIX}" \
+            --tag "${IMG}:${GITHUB_SHA::12}${SUFFIX}" \
+            $SOURCES
