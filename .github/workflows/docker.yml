@@ -68,6 +68,12 @@ jobs:
   build-amd64:
     needs: wait-for-pypi
     runs-on: ubuntu-latest
+    # packages: write is required for ghcr.io pushes. Without it GITHUB_TOKEN
+    # is read-only by default on newer repos, so Docker Hub pushes succeed
+    # (they use a PAT) while every ghcr push silently fails with `denied`.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         target: [final-lean, final-pdf]
@@ -115,6 +121,9 @@ jobs:
   build-arm64:
     needs: wait-for-pypi
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     continue-on-error: true  # a wheel gap or emulation flake on this arch
                               # must never block amd64 from shipping
     strategy:
@@ -162,8 +171,11 @@ jobs:
 
   publish-manifest:
     needs: [wait-for-pypi, build-amd64, build-arm64]
-    if: always() && needs.build-amd64.result == 'success' && github.event_name != 'workflow_dispatch'
+    if: always() && needs.build-amd64.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         registry_image: ["joeovo/net-benchmark", "ghcr.io/net-benchmark/net-benchmark"]
@@ -186,7 +198,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Gate on NEW, fixable critical/high CVEs vs the currently-live :latest,
+      # not total CVE count — the -pdf image carries a known, unfixed critical
+      # (debian/tiff, no Debian patch exists) that would otherwise block every
+      # future build forever. only-fixed + ignore-unchanged means this only
+      # fails when something new and actually fixable shows up. Docker Hub
+      # only: docker scout is fundamentally a Docker Hub product, and this
+      # job already builds the manifest for both registries from the same
+      # source images, so one scan covers both.
+      #
+      # NOT verified end to end — this sandbox has no path to Docker Hub's
+      # API to test a real scout compare call. Run it once via
+      # workflow_dispatch (push unchecked) against a real published version
+      # before trusting it to gate an actual release.
+      - name: Docker Scout — block on new fixable critical/high CVEs
+        if: startsWith(matrix.registry_image, 'joeovo/')
+        uses: docker/scout-action@v1
+        with:
+          command: compare
+          image: ${{ matrix.registry_image }}:${{ needs.wait-for-pypi.outputs.version }}${{ matrix.variant.suffix }}${{ github.event_name == 'workflow_dispatch' && format('-{0}', inputs.tag_suffix) || '' }}-amd64
+          to: ${{ matrix.registry_image }}:latest${{ matrix.variant.suffix }}
+          ignore-unchanged: true
+          only-severities: critical,high
+          only-fixed: true
+          exit-code: true
+          exit-on: vulnerability
+
       - name: Assemble manifest (amd64 + arm64 if it landed, amd64 alone otherwise)
+        if: github.event_name != 'workflow_dispatch'  # never touch :latest or the version tag from a test run
         env:
           V: ${{ needs.wait-for-pypi.outputs.version }}
           SUFFIX: ${{ matrix.variant.suffix }}
