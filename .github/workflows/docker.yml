@@ -81,7 +81,7 @@ jobs:
       lean_digest: ${{ steps.digest.outputs.lean_digest }}
     steps:
       - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -132,7 +132,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -181,7 +181,7 @@ jobs:
         registry_image: ["joeovo/net-benchmark", "ghcr.io/net-benchmark/net-benchmark"]
         variant: [{ suffix: "", target: "final-lean" }, { suffix: "-pdf", target: "final-pdf" }]
     steps:
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         if: startsWith(matrix.registry_image, 'joeovo/')
