@@ -9,6 +9,7 @@ from a single cli.
 
 [![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
+[![Docker Pulls](https://img.shields.io/docker/pulls/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
 [![Docs](https://readthedocs.org/projects/net-benchmark/badge/?version=latest)](https://net-benchmark.readthedocs.io/en/latest/)
 [![Discussions](https://img.shields.io/github/discussions/net-benchmark/net-benchmark)](https://github.com/net-benchmark/net-benchmark/discussions)
 [![PyPI - Wheel](https://img.shields.io/pypi/wheel/net-benchmark)](https://pypi.org/project/net-benchmark)
@@ -18,6 +19,14 @@ from a single cli.
 pip install net-benchmark
 pip install net-benchmark[pdf]   # with pdf export
 ```
+
+Also available as a container image — no local Python needed:
+
+```bash
+docker run --rm joeovo/net-benchmark:latest http benchmark --use-defaults --formats csv,excel
+```
+
+`joeovo/net-benchmark` on Docker Hub, `ghcr.io/net-benchmark/net-benchmark` on GHCR. Full guide: [Running in Docker](https://net-benchmark.readthedocs.io/en/latest/guides/docker.html).
 
 > successor to [dns-benchmark-tool](https://github.com/net-benchmark/dns-benchmark-tool) — fully backward compatible.
 > `dns-benchmark` command still works as an alias.
