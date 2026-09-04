@@ -100,11 +100,18 @@ pip install net-benchmark          # core
 pip install net-benchmark[pdf]     # with pdf export
 ```
 
-Or run it in Docker, no local Python needed — see [Running in Docker](https://net-benchmark.readthedocs.io/en/latest/guides/automation-ci.html#running-in-docker):
+### Docker
+
+No local Python needed:
 
 ```bash
+docker pull joeovo/net-benchmark:latest        # csv, excel, json
+docker pull joeovo/net-benchmark:latest-pdf    # adds PDF report export
+
 docker run --rm joeovo/net-benchmark:latest http benchmark --use-defaults --formats csv,excel
 ```
+
+Also available on GHCR: `ghcr.io/net-benchmark/net-benchmark`. Full guide, including CI/CD and Kubernetes examples: [Running in Docker](https://net-benchmark.readthedocs.io/en/latest/guides/docker.html).
 
 ### Requirements
 
