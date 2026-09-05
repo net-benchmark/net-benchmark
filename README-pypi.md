@@ -10,6 +10,7 @@ from a single cli.
 [![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
 [![Docker Pulls](https://img.shields.io/docker/pulls/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
+[![Docker Image Version](https://img.shields.io/docker/v/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
 [![Docs](https://readthedocs.org/projects/net-benchmark/badge/?version=latest)](https://net-benchmark.readthedocs.io/en/latest/)
 [![Discussions](https://img.shields.io/github/discussions/net-benchmark/net-benchmark)](https://github.com/net-benchmark/net-benchmark/discussions)
 [![PyPI - Wheel](https://img.shields.io/pypi/wheel/net-benchmark)](https://pypi.org/project/net-benchmark)
@@ -27,6 +28,13 @@ docker run --rm joeovo/net-benchmark:latest http benchmark --use-defaults --form
 ```
 
 `joeovo/net-benchmark` on Docker Hub, `ghcr.io/net-benchmark/net-benchmark` on GHCR. Full guide: [Running in Docker](https://net-benchmark.readthedocs.io/en/latest/guides/docker.html).
+
+Or via Homebrew:
+
+```bash
+brew tap net-benchmark/net-benchmark
+brew install net-benchmark
+```
 
 > successor to [dns-benchmark-tool](https://github.com/net-benchmark/dns-benchmark-tool) — fully backward compatible.
 > `dns-benchmark` command still works as an alias.
@@ -58,7 +66,7 @@ net-benchmark dns monitoring --use-defaults --interval 30
 | `--dnssec-validate` | fail if ad flag absent | `false` |
 | `--formats` | csv, excel, pdf, json | `csv,excel,pdf` |
 
-full documentation: [github.com/net-benchmark/net-benchmark](https://github.com/net-benchmark/net-benchmark#dns-benchmark)
+full documentation: [DNS Benchmark guide](https://net-benchmark.readthedocs.io/en/latest/guides/dns-benchmark.html)
 
 </details>
 
@@ -91,7 +99,7 @@ net-benchmark http monitoring --use-defaults --interval 30
 | `--no-verify-ssl` | skip tls verification | `false` |
 | `--formats` | csv, excel, pdf, json | `csv,excel,pdf` |
 
-full documentation: [github.com/net-benchmark/net-benchmark](https://github.com/net-benchmark/net-benchmark#http-benchmark)
+full documentation: [HTTP Benchmark guide](https://net-benchmark.readthedocs.io/en/latest/guides/http-benchmark.html)
 
 </details>
 
@@ -145,7 +153,7 @@ full documentation: [http load testing](https://net-benchmark.readthedocs.io/en/
 net-benchmark ssl check --hosts "example.com,api.example.com"
 ```
 
-full documentation: [github.com/net-benchmark/net-benchmark](https://github.com/net-benchmark/net-benchmark#ssl-check)
+full documentation: [SSL Check guide](https://net-benchmark.readthedocs.io/en/latest/guides/ssl-check.html)
 
 </details>
 

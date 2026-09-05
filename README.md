@@ -12,9 +12,11 @@ fast, extensible network benchmarking — dns, http, and ssl from a single cli.
 [![PyPI version](https://badge.fury.io/py/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![Python](https://img.shields.io/pypi/pyversions/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
+[![Tests](https://github.com/net-benchmark/net-benchmark/actions/workflows/test.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions/workflows/test.yml)
+[![Docker](https://github.com/net-benchmark/net-benchmark/actions/workflows/docker.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions/workflows/docker.yml)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
 [![Docker Pulls](https://img.shields.io/docker/pulls/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
+[![Docker Image Version](https://img.shields.io/docker/v/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
 [![Docs](https://readthedocs.org/projects/net-benchmark/badge/?version=latest)](https://net-benchmark.readthedocs.io/en/latest/)
 [![Discussions](https://img.shields.io/github/discussions/net-benchmark/net-benchmark)](https://github.com/net-benchmark/net-benchmark/discussions)
 [![PyPI - Wheel](https://img.shields.io/pypi/wheel/net-benchmark)](https://pypi.org/project/net-benchmark)
@@ -112,6 +114,13 @@ docker run --rm joeovo/net-benchmark:latest http benchmark --use-defaults --form
 ```
 
 Also available on GHCR: `ghcr.io/net-benchmark/net-benchmark`. Full guide, including CI/CD and Kubernetes examples: [Running in Docker](https://net-benchmark.readthedocs.io/en/latest/guides/docker.html).
+
+### Homebrew
+
+```bash
+brew tap net-benchmark/net-benchmark
+brew install net-benchmark
+```
 
 ### Requirements
 
