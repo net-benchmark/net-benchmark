@@ -44,11 +44,9 @@ jobs:
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           fi
 
-      # pypi.yml triggers off this same tag push independently — GitHub gives
-      # no ordering guarantee between separate workflow files reacting to one
-      # event. This image installs from PyPI, not repo source, on purpose
-      # (see Dockerfile comments), so it has to wait for the real thing to
-      # exist rather than race it.
+      # pypi.yml fires off this same tag independently, no ordering
+      # guarantee between them. Image installs from PyPI, so it has to
+      # wait for the real thing rather than race it.
       - name: Wait for the version to actually be installable from PyPI
         run: |
           V="${{ steps.version.outputs.version }}"
@@ -68,13 +66,14 @@ jobs:
   build-amd64:
     needs: wait-for-pypi
     runs-on: ubuntu-latest
-    # packages: write is required for ghcr.io pushes. Without it GITHUB_TOKEN
-    # is read-only by default on newer repos, so Docker Hub pushes succeed
-    # (they use a PAT) while every ghcr push silently fails with `denied`.
+    # packages: write required for ghcr.io — GITHUB_TOKEN defaults to
+    # read-only, silently breaks ghcr push while Docker Hub (PAT auth)
+    # still works.
     permissions:
       contents: read
       packages: write
     strategy:
+      fail-fast: false  # a failure in one target (e.g. -pdf) must not cancel the other before it finishes
       matrix:
         target: [final-lean, final-pdf]
     outputs:
@@ -127,6 +126,7 @@ jobs:
     continue-on-error: true  # a wheel gap or emulation flake on this arch
                               # must never block amd64 from shipping
     strategy:
+      fail-fast: false  # a failure in one target (e.g. -pdf) must not cancel the other before it finishes
       matrix:
         target: [final-lean, final-pdf]
     steps:
@@ -198,19 +198,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Gate on NEW, fixable critical/high CVEs vs the currently-live :latest,
-      # not total CVE count — the -pdf image carries a known, unfixed critical
-      # (debian/tiff, no Debian patch exists) that would otherwise block every
-      # future build forever. only-fixed + ignore-unchanged means this only
-      # fails when something new and actually fixable shows up. Docker Hub
-      # only: docker scout is fundamentally a Docker Hub product, and this
-      # job already builds the manifest for both registries from the same
-      # source images, so one scan covers both.
-      #
-      # NOT verified end to end — this sandbox has no path to Docker Hub's
-      # API to test a real scout compare call. Run it once via
-      # workflow_dispatch (push unchecked) against a real published version
-      # before trusting it to gate an actual release.
+      # Gates on NEW fixable critical/high CVEs vs current :latest, not
+      # total count — -pdf has a known unfixed debian/tiff critical that
+      # would otherwise block every build. Docker Hub only; scout is a
+      # Docker Hub product. Untested — confirm via workflow_dispatch
+      # before trusting this on a real release.
       - name: Docker Scout — block on new fixable critical/high CVEs
         if: startsWith(matrix.registry_image, 'joeovo/')
         uses: docker/scout-action@v1
