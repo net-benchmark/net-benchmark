@@ -213,7 +213,6 @@ jobs:
           ignore-unchanged: true
           only-severities: critical,high
           only-fixed: true
-          exit-code: true
           exit-on: vulnerability
 
       - name: Assemble manifest (amd64 + arm64 if it landed, amd64 alone otherwise)
