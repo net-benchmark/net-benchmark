@@ -1,3 +1,16 @@
+## v0.5.6 (2026-09-07)
+
+### Feat
+
+- **ci**: push Docker images to joeovo/net-benchmark, not net-benchmark/net-benchmark
+
+### Fix
+
+- **docs**: correct stale Docker Hub namespace to joeovo/net-benchmark
+- **ci**: cache pip in test matrix to reduce 3.11 leg resolver time
+- **ci**: grant packages:write for ghcr.io, make Scout gate testable via dispatch
+- **docs**: correct docker hub namespace to joeovo/net-benchmark
+
 ## v0.5.5 (2026-09-03)
 
 ### Feat
