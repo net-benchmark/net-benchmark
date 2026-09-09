@@ -10,7 +10,6 @@ import time
 import uuid
 from collections import OrderedDict, defaultdict
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import (
@@ -30,8 +29,6 @@ from urllib.parse import urlparse
 
 import httpcore
 import httpx
-from cryptography import x509
-from cryptography.x509.oid import NameOID
 from httpcore._backends.auto import AutoBackend
 from httpcore._backends.base import (
     SOCKET_OPTION,
@@ -56,6 +53,7 @@ except ImportError:
     _H2_AVAILABLE = False
 
 from net_benchmark.dns_benchmark.core import QueryStatus
+from net_benchmark.ssl_check.certificate import parse_cert_der_compat
 from net_benchmark.utils.messages import warning
 
 # ---------------------------------------------------------------------------
@@ -474,52 +472,20 @@ class MetricsCapturingTransport(httpx.AsyncHTTPTransport):
 def _parse_cert_der(
     cert_der: bytes,
 ) -> Tuple[Optional[int], Optional[str], Optional[str], List[str], bool]:
-    """Parse DER cert bytes with the cryptography library.
+    """Parse DER cert bytes.
 
     Returns (days_remaining, subject_cn, issuer_cn, sans, wildcard).
-    Uses cryptography (explicit dep) not ssl.getpeercert() dict, so all
-    fields are available consistently across Python versions.
+
+    Item 15 of the SSL roadmap: delegates to
+    net_benchmark.ssl_check.certificate.parse_cert_der_compat() instead of
+    parsing independently. Before this, HTTP and SSL each had their own
+    certificate parser -- exactly the kind of duplication that lets a
+    certificate get flagged weak by one and not the other as the two drift
+    apart over time. parse_cert_der_compat() was built to return this exact
+    tuple shape for that reason, so the migration is a delegation rather
+    than a rewrite of the callers below.
     """
-    try:
-        cert = x509.load_der_x509_certificate(cert_der)
-        # subject CN
-        try:
-            raw_cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-            cn: Optional[str] = (
-                raw_cn.decode("utf-8") if isinstance(raw_cn, bytes) else raw_cn
-            )
-        except IndexError:
-            cn = None
-        # issuer CN
-        try:
-            raw_issuer = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[
-                0
-            ].value
-            issuer_cn: Optional[str] = (
-                raw_issuer.decode("utf-8")
-                if isinstance(raw_issuer, bytes)
-                else raw_issuer
-            )
-        except IndexError:
-            issuer_cn = None
-        # SANs
-        try:
-            san_ext = cert.extensions.get_extension_for_class(
-                x509.SubjectAlternativeName
-            )
-            sans: List[str] = san_ext.value.get_values_for_type(x509.DNSName)
-        except Exception:
-            sans = []
-        wildcard = any(s.startswith("*.") for s in sans)
-        # expiry
-        try:
-            expiry = cert.not_valid_after_utc
-        except AttributeError:
-            expiry = cert.not_valid_after.replace(tzinfo=timezone.utc)
-        days = (expiry - datetime.now(tz=timezone.utc)).days
-        return days, cn, issuer_cn, sans, wildcard
-    except Exception:
-        return None, None, None, [], False
+    return parse_cert_der_compat(cert_der)
 
 
 # ---------------------------------------------------------------------------
