@@ -59,7 +59,6 @@ release-tag.sh
 gpg-check.sh
 {outdir}
 notes/
-src/net_benchmark/ssl_check/
 
 scan-*.txt/
 *.sarif
