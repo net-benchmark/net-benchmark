@@ -21,6 +21,13 @@ from typing import Callable, Coroutine, Dict, List
 import pytest
 from openpyxl import load_workbook
 
+try:
+    import weasyprint  # noqa: F401
+
+    _WEASYPRINT_AVAILABLE = True
+except ImportError:
+    _WEASYPRINT_AVAILABLE = False
+
 from net_benchmark.ssl_check.analysis import SSLAnalyzer, parse_threshold
 from net_benchmark.ssl_check.core import (
     PolicyConfig,
@@ -418,6 +425,7 @@ class TestSSLPDFExporter:
         )
         assert "Unreachable" not in html
 
+    @pytest.mark.skipif(not _WEASYPRINT_AVAILABLE, reason="weasyprint not installed")
     async def test_export_results_produces_a_real_pdf(
         self, small_fleet: List[SSLResult], tmp_path: Path
     ) -> None:
