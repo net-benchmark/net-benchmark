@@ -5,9 +5,9 @@ from a single cli.
 
 [![PyPI version](https://badge.fury.io/py/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![Python](https://img.shields.io/pypi/pyversions/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
-![License](https://img.shields.io/badge/license-MIT-yellow.svg)
-
-[![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://github.com/net-benchmark/net-benchmark/actions/workflows/test.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions/workflows/test.yml)
+[![Docker](https://github.com/net-benchmark/net-benchmark/actions/workflows/docker.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions/workflows/docker.yml)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
 [![Docker Pulls](https://img.shields.io/docker/pulls/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
 [![Docker Image Version](https://img.shields.io/docker/v/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
@@ -147,13 +147,22 @@ full documentation: [http load testing](https://net-benchmark.readthedocs.io/en/
 </details>
 
 <details>
-<summary><strong>ssl check</strong> — certificate expiry and chain validation <em>(coming 0.6.0)</em></summary>
+<summary><strong>ssl check</strong> — TLS handshake, certificate, and policy audit</summary>
 
 ```bash
-net-benchmark ssl check --hosts "example.com,api.example.com"
+# certificate expiry, weak keys/signatures, deprecated TLS, all flagged by default
+net-benchmark ssl check --targets "example.com,api.example.com"
+
+# CI gate: fail the build on an expiring certificate
+net-benchmark ssl check --targets ./targets.txt --threshold 'cert_expiry_days>30'
+
+# mail server STARTTLS on a non-standard port
+net-benchmark ssl check --targets mail.example.com:2525 --starttls smtp
 ```
 
-full documentation: [SSL Check guide](https://net-benchmark.readthedocs.io/en/latest/guides/ssl-check.html)
+Chain-of-trust and revocation reporting need Python 3.13+
+(`SSLObject.get_unverified_chain()`); on 3.11/3.12 the leaf certificate is
+still fully checked. Full documentation: [SSL Check guide](https://net-benchmark.readthedocs.io/en/latest/guides/ssl-check.html)
 
 </details>
 

@@ -12,8 +12,11 @@ benchmarking di rete veloce ed estensibile — dns, http e ssl da una sola cli.
 [![PyPI version](https://badge.fury.io/py/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![Python](https://img.shields.io/pypi/pyversions/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
+[![Tests](https://github.com/net-benchmark/net-benchmark/actions/workflows/test.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions/workflows/test.yml)
+[![Docker](https://github.com/net-benchmark/net-benchmark/actions/workflows/docker.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions/workflows/docker.yml)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
+[![Docker Pulls](https://img.shields.io/docker/pulls/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
+[![Docker Image Version](https://img.shields.io/docker/v/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
 [![Docs](https://readthedocs.org/projects/net-benchmark/badge/?version=latest)](https://net-benchmark.readthedocs.io/en/latest/)
 [![Discussions](https://img.shields.io/github/discussions/net-benchmark/net-benchmark)](https://github.com/net-benchmark/net-benchmark/discussions)
 [![PyPI - Wheel](https://img.shields.io/pypi/wheel/net-benchmark)](https://pypi.org/project/net-benchmark)
@@ -101,9 +104,29 @@ pip install net-benchmark          # core
 pip install net-benchmark[pdf]     # with pdf export
 ```
 
+### Docker
+
+Senza bisogno di Python installato localmente:
+
+```bash
+docker pull joeovo/net-benchmark:latest        # csv, excel, json
+docker pull joeovo/net-benchmark:latest-pdf    # aggiunge l'export PDF
+
+docker run --rm joeovo/net-benchmark:latest http benchmark --use-defaults --formats csv,excel
+```
+
+Disponibile anche su GHCR: `ghcr.io/net-benchmark/net-benchmark`. Guida completa, inclusi esempi CI/CD e Kubernetes: [Eseguire in Docker](https://net-benchmark.readthedocs.io/en/latest/guides/docker.html).
+
+### Homebrew
+
+```bash
+brew tap net-benchmark/net-benchmark
+brew install net-benchmark
+```
+
 ### Requisiti
 
-- Python 3.9+
+- Python 3.11+
 - gestore di pacchetti pip
 
 ### Installazione dai sorgenti
@@ -1315,7 +1338,7 @@ Esegui più iterazioni (`--iterations 5`) per risultati più stabili.
 
 ### Benchmark HTTP
 
-<details open>
+<details>
 <summary><strong>Benchmark HTTP</strong> — latenza, TTFB, header di sicurezza, fingerprinting CDN, certificati TLS</summary>
 
 #### 🎯 Perché questo strumento?
@@ -2086,16 +2109,109 @@ Le prestazioni HTTP variano per condizioni di rete, carico del server, cambi di 
 
 ### Controllo SSL
 
-<details>
-<summary><strong>Controllo SSL</strong> — scadenza dei certificati, validazione della catena <em>(in arrivo nella 0.6.0)</em></summary>
+<details open>
+<summary><strong>Controllo SSL</strong> — handshake TLS, certificati e audit delle policy</summary>
 
-#### Funzionalità pianificate
+#### 🎯 Perché questo strumento?
 
-- controllo delle date di scadenza dei certificati
-- validazione delle catene di certificati e dei trust store
-- monitoraggio di più host con avvisi
+Un certificato che scade senza che nessuno se ne accorga, una versione TLS
+obsoleta lasciata attiva, un server STARTTLS che smette silenziosamente di
+funzionare: questi guasti diventano un'interruzione di servizio — non un
+avviso preventivo — perché nessuno li monitora tra un rinnovo e l'altro.
 
-> **Stato:** pianificato per la versione 0.6.0 — [i contributi sono benvenuti](CONTRIBUTING.md)
+##### Il problema
+
+- 📜 **I certificati scadono in silenzio** — ce ne si accorge solo quando il client rifiuta la connessione
+- 🔓 **I protocolli obsoleti persistono** — TLS 1.0/1.1 e cifrari deboli restano abilitati ben oltre il dovuto
+- 🔑 **Chiavi e firme deboli passano inosservate** — RSA-1024, firme SHA-1, certificati mai riauditati dall'emissione
+- 📬 **STARTTLS si rompe silenziosamente** — un server di posta o directory che smette di offrire STARTTLS fallisce in modo diverso da uno che smette di rispondere
+- 🌐 **Le superfici TLS multi-porta vengono trascurate** — la 443 viene controllata, 465/587/993/995/636 spesso no
+
+##### La soluzione
+
+net-benchmark ti aiuta a:
+
+- 🔍 **Verificare l'intero handshake** — versione TLS negoziata, cipher suite (con codice IANA), ALPN, ripresa di sessione
+- 📅 **Tracciare il ciclo di vita del certificato** — giorni rimanenti, conformità al periodo di validità CA/Browser Forum, un controllo predittivo su rinnovi che supererebbero un limite in procinto di restringersi
+- 🔑 **Segnalare crittografia debole** — chiavi sotto la soglia minima, hash di firma compromessi, versioni TLS obsolete
+- 📬 **Controllare STARTTLS esplicitamente** — SMTP, IMAP, POP3, FTP, LDAP, con un override per porte non standard
+- 🚦 **Bloccare la CI in base alla policy** — `--threshold` fa fallire la build per target su un certificato in scadenza, un mismatch di hostname o una versione obsoleta
+
+##### Ideale per
+
+- ✅ **DevOps/SRE** che vogliono intercettare la scadenza di un certificato prima che diventi un incidente
+- ✅ **Security engineer** che verificano la configurazione TLS su un intero parco server
+- ✅ **Team platform** che vogliono bloccare i deploy in CI in base a certificati e policy di protocollo
+
+---
+
+#### Avvio rapido
+
+```bash
+# Controlla un singolo endpoint
+net-benchmark ssl check --targets api.example.com
+
+# Controllane diversi, con una soglia di scadenza certificato per la CI
+net-benchmark ssl check \
+  --targets "api.example.com,www.example.com" \
+  --threshold 'cert_expiry_days>30' \
+  --formats csv,excel
+```
+
+I risultati vengono salvati in `./benchmark_results/` — un codice di uscita
+diverso da zero indica che una `--threshold` non è stata rispettata, ed è
+proprio questo che rende il comando utilizzabile come step in CI.
+
+---
+
+#### Opzioni comuni
+
+| Flag | Cosa fa |
+|---|---|
+| `--targets` / `-t` | Host separati da virgola (`host`, `host:port` o un URL) oppure un file, uno per riga |
+| `--ports` | Porte applicate ai target senza porta esplicita (default: `443`) |
+| `--all-ports` | Scansiona l'insieme comune di porte TLS/STARTTLS (443, 8443, 465, 993, 995, 587, 636) |
+| `--starttls` | Forza il protocollo STARTTLS (`smtp`, `imap`, `pop3`, `ldap`, `ftp`) invece di dedurlo dalla porta — necessario per un server di posta su una porta non standard |
+| `--resolve` | Fissa un target a un IP senza risoluzione DNS: `host:port:ip` (ripetibile) |
+| `--handshake-samples` / `--min-samples` | Handshake per target per i percentili di latenza; i percentili vengono omessi sotto `--min-samples` invece di essere riportati in modo inaffidabile |
+| `--check-resumption` | Testa il supporto alla ripresa di sessione TLS con una coppia di handshake dedicata |
+| `--min-days-remaining` | Segnala un certificato in scadenza entro N giorni |
+| `--min-tls-version` | Segnala una versione negoziata sotto questa soglia, es. `TLSv1.2` |
+| `--expected-issuer` / `--expected-fingerprint` | Segnala un certificato che non corrisponde a un issuer o fingerprint atteso |
+| `--as-of` | Valuta ogni certificato a una data futura, ad es. per controllare cosa si romperà a una scadenza di rinnovo |
+| `--threshold` | Criterio di superamento/fallimento, es. `cert_expiry_days>30` (ripetibile, valutato per target, codice di uscita 1 su qualsiasi fallimento) |
+
+Riferimento completo dei flag: `net-benchmark ssl check --help`.
+
+```bash
+# Scansione multi-porta con policy rigorosa
+net-benchmark ssl check --targets mail.example.com --all-ports \
+  --min-tls-version TLSv1.2 --require-forward-secrecy
+
+# STARTTLS di un server di posta su porta non standard
+net-benchmark ssl check --targets mail.example.com:2525 --starttls smtp
+
+# Cosa si romperà al prossimo rinnovo trimestrale?
+net-benchmark ssl check --targets api.example.com --as-of 2026-09-01
+
+# Soglia CI: fallisce la build su qualunque target in scadenza o con TLS obsoleto
+net-benchmark ssl check --targets ./targets.txt \
+  --threshold 'cert_expiry_days>30' \
+  --threshold 'deprecated_tls_rate==0' \
+  --quiet
+```
+
+#### Una nota sulle catene di certificati
+
+Il report completo della catena di fiducia (quale CA l'ha emesso, se la
+catena inviata dal server è completa, lo stato di revoca) richiede
+`SSLObject.get_unverified_chain()`, disponibile solo da **Python 3.13**. Su
+3.11/3.12 questo controllo riporta comunque tutto ciò che riguarda il
+certificato foglia presentato dal target — scadenza, robustezza della
+chiave, firma, corrispondenza dell'hostname — ma i campi relativi alla
+catena vengono riportati come non osservati, non come una stima. Il
+report sulla catena di fiducia e sulla revoca sono previsti in una
+release successiva.
 
 </details>
 
