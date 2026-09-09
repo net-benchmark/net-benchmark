@@ -20,6 +20,13 @@ from typing import Any, List
 import pytest
 from click.testing import CliRunner
 
+try:
+    import weasyprint  # noqa: F401
+
+    _WEASYPRINT_AVAILABLE = True
+except ImportError:
+    _WEASYPRINT_AVAILABLE = False
+
 from net_benchmark.ssl_check.certificate import (
     CertificateInfo,
     Fingerprints,
@@ -593,6 +600,7 @@ class TestExportFormats:
         assert result.exit_code == 0, result.output
         assert list(tmp_path.glob("*.xlsx"))
 
+    @pytest.mark.skipif(not _WEASYPRINT_AVAILABLE, reason="weasyprint not installed")
     def test_pdf_export(
         self, runner: CliRunner, mock_check_targets: List[SSLTarget], tmp_path: Path
     ) -> None:
@@ -611,6 +619,40 @@ class TestExportFormats:
         )
         assert result.exit_code == 0, result.output
         assert list(tmp_path.glob("*.pdf"))
+
+    def test_pdf_export_failure_is_graceful_not_a_crash(
+        self,
+        runner: CliRunner,
+        mock_check_targets: List[SSLTarget],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Independent of whether weasyprint is actually installed in this
+        environment: forces the exact ImportError weasyprint's absence
+        raises (sys.modules['weasyprint'] = None makes the import statement
+        itself fail), and confirms cli.py's PDF export try/except catches
+        it, prints a message, and still exits 0 with the other requested
+        formats intact -- rather than taking the whole command down."""
+        import sys
+        from unittest.mock import patch
+
+        with patch.dict(sys.modules, {"weasyprint": None}):
+            result = runner.invoke(
+                ssl_group,
+                [
+                    "check",
+                    "--targets",
+                    "example.test",
+                    "--formats",
+                    "csv,pdf",
+                    "--output",
+                    str(tmp_path),
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert "PDF export failed" in result.output
+        assert not list(tmp_path.glob("*.pdf"))
+        assert list(tmp_path.glob("*_raw.csv")), "csv export should still succeed"
 
 
 class TestQuietMode:
