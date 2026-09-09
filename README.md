@@ -141,10 +141,12 @@ pip install -e .
 net-benchmark --version
 net-benchmark dns --help
 net-benchmark http --help
+net-benchmark ssl check --help
 
 # See all available options for a specific command
 net-benchmark dns benchmark --help
 net-benchmark http benchmark --help
+net-benchmark ssl check --help
 ```
 
 ### First Run
@@ -1337,7 +1339,7 @@ Run multiple iterations (`--iterations 5`) for more consistent results.
 
 ### HTTP benchmark
 
-<details open>
+<details>
 <summary><strong>HTTP benchmark</strong> — latency, TTFB, security headers, CDN fingerprinting, TLS certs</summary>
 
 #### 🎯 Why This Tool?
@@ -2107,16 +2109,106 @@ HTTP performance varies due to network conditions, server load, CDN routing chan
 
 ### SSL check
 
-<details>
-<summary><strong>SSL check</strong> — certificate expiry, chain validation <em>(coming in 0.6.0)</em></summary>
+<details open>
+<summary><strong>SSL check</strong> — TLS handshake, certificate, and policy audit</summary>
 
-#### Planned features
+#### 🎯 Why This Tool?
 
-- check certificate expiration dates
-- validate certificate chains and trust stores
-- monitor multiple hosts with alerts
+A certificate expiring unnoticed, a deprecated TLS version left enabled, a
+mail server's STARTTLS quietly stopped working — these are the failures that
+show up as an outage, not a warning, because nothing was watching for them
+between renewals.
 
-> **Status:** planned for version 0.6.0 — [contributions welcome](CONTRIBUTING.md)
+##### The Problem
+
+- 📜 **Certificates expire silently** — nobody notices until a client refuses the connection
+- 🔓 **Deprecated protocols linger** — TLS 1.0/1.1 and weak ciphers stay enabled long after they should be gone
+- 🔑 **Weak keys and signatures slip through** — RSA-1024, SHA-1 signatures, certificates nobody re-audited since issuance
+- 📬 **STARTTLS breaks quietly** — a mail or directory server that stops offering STARTTLS fails differently than one that stops responding
+- 🌐 **Multi-port TLS surfaces get missed** — 443 gets checked, 465/587/993/995/636 often don't
+
+##### The Solution
+
+net-benchmark helps you:
+
+- 🔍 **Audit the full handshake** — negotiated TLS version, cipher suite (with IANA code), ALPN, session resumption
+- 📅 **Track certificate lifetime** — days remaining, CA/Browser Forum validity-period compliance, a forward-looking check for renewals that will exceed a soon-to-tighten cap
+- 🔑 **Flag weak crypto** — under-strength keys, broken signature hashes, deprecated TLS versions
+- 📬 **Check STARTTLS explicitly** — SMTP, IMAP, POP3, FTP, LDAP, with an override for non-standard ports
+- 🚦 **Gate CI on policy** — `--threshold` fails the build on an expiring certificate, a hostname mismatch, or a deprecated version, per target
+
+##### Perfect For
+
+- ✅ **DevOps/SRE** catching certificate expiry before it becomes an incident
+- ✅ **Security engineers** auditing TLS configuration across a fleet
+- ✅ **Platform teams** gating deploys on certificate and protocol policy in CI
+
+---
+
+#### Quick start
+
+```bash
+# Check a single endpoint
+net-benchmark ssl check --targets api.example.com
+
+# Check several, with a certificate expiry gate for CI
+net-benchmark ssl check \
+  --targets "api.example.com,www.example.com" \
+  --threshold 'cert_expiry_days>30' \
+  --formats csv,excel
+```
+
+Results are saved to `./benchmark_results/` — a non-zero exit code means a
+`--threshold` failed, which is what makes this usable as a CI step.
+
+---
+
+#### Common options
+
+| Flag | What it does |
+|---|---|
+| `--targets` / `-t` | Comma-separated hosts (`host`, `host:port`, or a URL) or a file, one per line |
+| `--ports` | Ports applied to targets with no explicit port (default: `443`) |
+| `--all-ports` | Scan the common TLS/STARTTLS port set (443, 8443, 465, 993, 995, 587, 636) |
+| `--starttls` | Force the STARTTLS protocol (`smtp`, `imap`, `pop3`, `ldap`, `ftp`) instead of guessing from the port — needed for a mail server on a non-standard port |
+| `--resolve` | Pin a target to an IP without DNS: `host:port:ip` (repeatable) |
+| `--handshake-samples` / `--min-samples` | Handshakes per target for timing percentiles; percentiles are withheld below `--min-samples` rather than reported unreliably |
+| `--check-resumption` | Test TLS session resumption with a dedicated pair of handshakes |
+| `--min-days-remaining` | Flag a certificate expiring within N days |
+| `--min-tls-version` | Flag a negotiated version below this floor, e.g. `TLSv1.2` |
+| `--expected-issuer` / `--expected-fingerprint` | Flag a certificate that doesn't match a pinned issuer or fingerprint |
+| `--as-of` | Evaluate every certificate as of a future date, e.g. to check what breaks at a renewal deadline |
+| `--threshold` | Pass/fail criterion, e.g. `cert_expiry_days>30` (repeatable, evaluated per target, exit code 1 on any failure) |
+
+Full flag reference: `net-benchmark ssl check --help`.
+
+```bash
+# Multi-port scan with a strict policy
+net-benchmark ssl check --targets mail.example.com --all-ports \
+  --min-tls-version TLSv1.2 --require-forward-secrecy
+
+# Mail server STARTTLS on a non-standard port
+net-benchmark ssl check --targets mail.example.com:2525 --starttls smtp
+
+# What breaks at the next quarterly renewal?
+net-benchmark ssl check --targets api.example.com --as-of 2026-09-01
+
+# CI gate: fail the build on any expiring or deprecated-TLS target
+net-benchmark ssl check --targets ./targets.txt \
+  --threshold 'cert_expiry_days>30' \
+  --threshold 'deprecated_tls_rate==0' \
+  --quiet
+```
+
+#### A note on certificate chains
+
+Full chain-of-trust reporting (which CA issued it, whether the chain the
+server sent is complete, revocation status) needs `SSLObject.get_unverified_chain()`,
+which is **Python 3.13+**. On 3.11/3.12 this check still reports everything
+about the leaf certificate the target presents — expiry, key strength,
+signature, hostname match — but chain fields report as not observed rather
+than guessed. Chain-of-trust and revocation reporting are planned for a
+follow-up release.
 
 </details>
 

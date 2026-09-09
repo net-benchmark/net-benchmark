@@ -5,8 +5,11 @@
 [![PyPI version](https://badge.fury.io/py/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![Python](https://img.shields.io/pypi/pyversions/net-benchmark.svg)](https://pypi.org/project/net-benchmark)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/net-benchmark/net-benchmark/actions/workflows/ci.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions)
+[![Tests](https://github.com/net-benchmark/net-benchmark/actions/workflows/test.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions/workflows/test.yml)
+[![Docker](https://github.com/net-benchmark/net-benchmark/actions/workflows/docker.yml/badge.svg)](https://github.com/net-benchmark/net-benchmark/actions/workflows/docker.yml)
 [![Downloads](https://pepy.tech/badge/net-benchmark)](https://pepy.tech/project/net-benchmark)
+[![Docker Pulls](https://img.shields.io/docker/pulls/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
+[![Docker Image Version](https://img.shields.io/docker/v/joeovo/net-benchmark.svg)](https://hub.docker.com/r/joeovo/net-benchmark)
 [![Docs](https://readthedocs.org/projects/net-benchmark/badge/?version=latest)](https://net-benchmark.readthedocs.io/en/latest/)
 [![Discussions](https://img.shields.io/github/discussions/net-benchmark/net-benchmark)](https://github.com/net-benchmark/net-benchmark/discussions)
 [![PyPI - Wheel](https://img.shields.io/pypi/wheel/net-benchmark)](https://pypi.org/project/net-benchmark)
@@ -89,9 +92,29 @@ pip install net-benchmark          # 核心功能
 pip install net-benchmark[pdf]     # 包含 PDF 导出
 ```
 
+### Docker
+
+无需本地安装 Python：
+
+```bash
+docker pull joeovo/net-benchmark:latest        # csv, excel, json
+docker pull joeovo/net-benchmark:latest-pdf    # 增加 PDF 报告导出
+
+docker run --rm joeovo/net-benchmark:latest http benchmark --use-defaults --formats csv,excel
+```
+
+也可通过 GHCR 获取：`ghcr.io/net-benchmark/net-benchmark`。完整指南（含 CI/CD 与 Kubernetes 示例）：[在 Docker 中运行](https://net-benchmark.readthedocs.io/en/latest/guides/docker.html)。
+
+### Homebrew
+
+```bash
+brew tap net-benchmark/net-benchmark
+brew install net-benchmark
+```
+
 ### 环境要求
 
-- Python 3.9+
+- Python 3.11+
 - pip 包管理器
 
 ### 从源码安装
@@ -1299,7 +1322,7 @@ DNS 性能受以下因素影响而变化：
 
 ### HTTP 基准测试
 
-<details open>
+<details>
 <summary><strong>HTTP 基准测试</strong> — 延迟、TTFB、安全头、CDN 指纹、TLS 证书</summary>
 
 #### 🎯 为什么需要这个工具？
@@ -2042,16 +2065,103 @@ HTTP 性能受网络状况、服务器负载、CDN 路由变化和 TLS 会话恢
 
 ### SSL 检查
 
-<details>
-<summary><strong>SSL 检查</strong> — 证书到期、链验证 <em>(0.6.0 版本推出)</em></summary>
+<details open>
+<summary><strong>SSL 检查</strong> — TLS 握手、证书与策略审计</summary>
 
-#### 计划中的功能
+#### 🎯 为什么需要这个工具？
 
-- 检查证书到期日期
-- 验证证书链和信任库
-- 监控多台主机并告警
+证书在无人察觉时过期、已弃用的 TLS 版本长期未被禁用、邮件服务器的 STARTTLS
+悄然失效——这些故障之所以变成事故而非提前预警，是因为在两次续期之间没有人
+持续监控它们。
 
-> **状态：** 计划于 0.6.0 版本推出 — [欢迎贡献](CONTRIBUTING.md)
+##### 问题所在
+
+- 📜 **证书悄然过期** — 直到客户端拒绝连接才会被发现
+- 🔓 **弃用协议长期存在** — TLS 1.0/1.1 和弱密码套件在本该淘汰后仍然启用
+- 🔑 **弱密钥和签名被忽视** — RSA-1024、SHA-1 签名，颁发后从未再审计过的证书
+- 📬 **STARTTLS 悄悄失效** — 停止提供 STARTTLS 的邮件/目录服务器，其故障方式与完全无响应不同
+- 🌐 **多端口 TLS 面被遗漏** — 443 端口通常会被检查，但 465/587/993/995/636 往往不会
+
+##### 解决方案
+
+net-benchmark 帮助你：
+
+- 🔍 **审计完整握手过程** — 协商的 TLS 版本、密码套件（含 IANA 编码）、ALPN、会话恢复
+- 📅 **追踪证书生命周期** — 剩余天数、CA/Browser Forum 有效期合规性，以及对"续期后是否会超出即将收紧的上限"的前瞻检查
+- 🔑 **标记弱加密配置** — 强度不足的密钥、被破解的签名哈希算法、已弃用的 TLS 版本
+- 📬 **显式检查 STARTTLS** — 支持 SMTP、IMAP、POP3、FTP、LDAP，并可为非标准端口指定协议
+- 🚦 **在 CI 中按策略设置门槛** — `--threshold` 可针对每个目标，在证书即将过期、主机名不匹配或使用弃用版本时使构建失败
+
+##### 适用人群
+
+- ✅ **DevOps/SRE** — 在证书过期演变为事故前发现问题
+- ✅ **安全工程师** — 审计整个基础设施的 TLS 配置
+- ✅ **平台团队** — 在 CI 中依据证书和协议策略设置部署门槛
+
+---
+
+#### 快速开始
+
+```bash
+# 检查单个目标
+net-benchmark ssl check --targets api.example.com
+
+# 检查多个目标，并为 CI 设置证书过期门槛
+net-benchmark ssl check \
+  --targets "api.example.com,www.example.com" \
+  --threshold 'cert_expiry_days>30' \
+  --formats csv,excel
+```
+
+结果保存在 `./benchmark_results/`——非零退出码表示某个 `--threshold`
+未通过，这也是它可以作为 CI 步骤使用的原因。
+
+---
+
+#### 常用选项
+
+| 参数 | 作用 |
+|---|---|
+| `--targets` / `-t` | 逗号分隔的主机（`host`、`host:port` 或 URL）或每行一个目标的文件 |
+| `--ports` | 应用于未指定端口的目标（默认：`443`） |
+| `--all-ports` | 扫描常见的 TLS/STARTTLS 端口集合（443、8443、465、993、995、587、636） |
+| `--starttls` | 强制指定 STARTTLS 协议（`smtp`、`imap`、`pop3`、`ldap`、`ftp`），而不是根据端口猜测——用于在非标准端口上运行 STARTTLS 的邮件服务器 |
+| `--resolve` | 将目标固定到指定 IP，跳过 DNS 解析：`host:port:ip`（可重复） |
+| `--handshake-samples` / `--min-samples` | 每个目标用于计算时延百分位数的握手次数；样本数低于 `--min-samples` 时百分位数将被保留而非给出不可靠的结果 |
+| `--check-resumption` | 通过一对独立握手测试 TLS 会话恢复能力 |
+| `--min-days-remaining` | 标记剩余天数低于 N 天的证书 |
+| `--min-tls-version` | 标记协商版本低于该下限的连接，例如 `TLSv1.2` |
+| `--expected-issuer` / `--expected-fingerprint` | 标记与预期颁发者或指纹不符的证书 |
+| `--as-of` | 以未来某个日期为基准评估所有证书，例如检查在续期截止日会出现什么问题 |
+| `--threshold` | 通过/失败条件，例如 `cert_expiry_days>30`（可重复，按目标逐一评估，任一失败则退出码为 1） |
+
+完整参数参考：`net-benchmark ssl check --help`。
+
+```bash
+# 多端口扫描并设置严格策略
+net-benchmark ssl check --targets mail.example.com --all-ports \
+  --min-tls-version TLSv1.2 --require-forward-secrecy
+
+# 邮件服务器在非标准端口上的 STARTTLS
+net-benchmark ssl check --targets mail.example.com:2525 --starttls smtp
+
+# 下一次季度续期时会出现什么问题？
+net-benchmark ssl check --targets api.example.com --as-of 2026-09-01
+
+# CI 门槛：任何证书过期或使用弃用 TLS 版本的目标都会使构建失败
+net-benchmark ssl check --targets ./targets.txt \
+  --threshold 'cert_expiry_days>30' \
+  --threshold 'deprecated_tls_rate==0' \
+  --quiet
+```
+
+#### 关于证书链的说明
+
+完整的信任链报告（由哪个 CA 签发、服务器发送的证书链是否完整、吊销状态）
+需要 `SSLObject.get_unverified_chain()`，该方法要求 **Python 3.13 及以上**。
+在 3.11/3.12 上，此检查仍会报告目标叶证书的全部信息——过期时间、密钥强度、
+签名、主机名匹配——但证书链字段会标记为"未观测到"，而不是猜测结果。
+信任链与吊销状态报告计划在后续版本中提供。
 
 </details>
 
