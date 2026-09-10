@@ -234,3 +234,47 @@ jobs:
             --tag "${IMG}:latest${SUFFIX}" \
             --tag "${IMG}:${GITHUB_SHA::12}${SUFFIX}" \
             $SOURCES
+
+      # Per-arch tags (-amd64/-arm64) exist only so this job can assemble
+      # them into the manifest above — the manifest references the images
+      # by digest, not by tag, so deleting the tag afterward doesn't touch
+      # what actually got published. continue-on-error because a cleanup
+      # failure must never be allowed to affect whether the release itself
+      # succeeded — worst case, an extra tag sits there until next time.
+      - name: Clean up per-arch source tags (Docker Hub)
+        if: github.event_name != 'workflow_dispatch' && startsWith(matrix.registry_image, 'joeovo/')
+        continue-on-error: true
+        env:
+          V: ${{ needs.wait-for-pypi.outputs.version }}
+          SUFFIX: ${{ matrix.variant.suffix }}
+        run: |
+          TOKEN=$(curl -s -H "Content-Type: application/json" -X POST \
+            -d "{\"username\": \"${{ secrets.DOCKERHUB_USERNAME }}\", \"password\": \"${{ secrets.DOCKERHUB_TOKEN }}\"}" \
+            https://hub.docker.com/v2/users/login/ | jq -r .token)
+          for arch in amd64 arm64; do
+            curl -s -X DELETE -H "Authorization: JWT $TOKEN" \
+              "https://hub.docker.com/v2/repositories/joeovo/net-benchmark/tags/${V}${SUFFIX}-${arch}/"
+          done
+
+      # NOT verified — GITHUB_TOKEN + packages:write is confirmed to push
+      # to ghcr.io, but package *version deletion* is a different
+      # permission and hasn't been tested. continue-on-error means a
+      # failure here is silent (check the Actions log, not tag list, to
+      # know if it's actually working) — confirm via a real run before
+      # assuming ghcr cleanup is happening at all.
+      - name: Clean up per-arch source tags (GHCR)
+        if: github.event_name != 'workflow_dispatch' && startsWith(matrix.registry_image, 'ghcr.io/')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ needs.wait-for-pypi.outputs.version }}
+          SUFFIX: ${{ matrix.variant.suffix }}
+        run: |
+          for arch in amd64 arm64; do
+            TAG="${V}${SUFFIX}-${arch}"
+            VERSION_ID=$(gh api "/orgs/net-benchmark/packages/container/net-benchmark/versions" --paginate \
+              --jq ".[] | select(.metadata.container.tags[]? == \"${TAG}\") | .id" | head -1)
+            if [ -n "$VERSION_ID" ]; then
+              gh api --method DELETE "/orgs/net-benchmark/packages/container/net-benchmark/versions/${VERSION_ID}"
+            fi
+          done
