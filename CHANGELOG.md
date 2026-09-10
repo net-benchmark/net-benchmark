@@ -1,3 +1,30 @@
+## v0.6.0 (2026-09-10)
+
+### BREAKING CHANGE
+
+- every input-validation failure raises
+click.UsageError, exit code 2, explicit message -- missing targets,
+invalid --formats, missing targets file, malformed target, malformed
+--resolve.
+
+### Feat
+
+- **ssl_check**: add ssl check CLI command
+- **ssl_check**: add SSLAnalyzer, threshold reporting, and exporters
+- **ssl_check**: add SSLCheckEngine, SSLResult, and policy evaluation
+- **ssl_check**: add TLS handshake transport and certificate parsing
+
+### Fix
+
+- **ssl_check**: skip PDF tests gracefully when weasyprint isn't installed
+- **gitignore**: remove obsolete src/net_benchmark/ssl_check/ exclusion
+- **ci**: drop deprecated exit-code, keep exit-on (Scout warned about it in the last run)
+- **ci**: add fail-fast: false to build matrices
+
+### Refactor
+
+- **http_bench**: migrate _parse_cert_der onto ssl_check's parser
+
 ## v0.5.6 (2026-09-07)
 
 ### Feat
