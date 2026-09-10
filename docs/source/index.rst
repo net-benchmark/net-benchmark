@@ -31,10 +31,9 @@ net-benchmark
    :target: https://hub.docker.com/r/joeovo/net-benchmark
    :alt: Docker Pulls
 
-.. image:: https://img.shields.io/docker/v/joeovo/net-benchmark.svg
+.. image:: https://img.shields.io/docker/v/joeovo/net-benchmark/latest.svg
    :target: https://hub.docker.com/r/joeovo/net-benchmark
    :alt: Docker Image Version
-
 ----
 
 **net-benchmark** is a fast, extensible network benchmarking suite for **DNS**, **HTTP**, and
