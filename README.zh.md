@@ -57,17 +57,6 @@ net-benchmark http load-test -t https://checkout.example.com/api/cart \
   --threshold 'p95_latency<400'
 ```
 
-### 0.5.2 新增内容
-
-**分布式负载测试。** 在目标被压垮之前，单个 Python 进程往往先成为瓶颈。
-`--workers N` 现在可以从 N 个独立进程发起负载并同步启动；百分位数由**合并后的
-直方图重新计算**，而不是对各 worker 的结果取平均——把多个 P95 平均起来得到的是
-另一个数字，而非近似值。负载还可通过共享启动屏障跨多台机器运行，并用新的
-`merge-load-test` 收集器合并。参见[负载测试](#-负载测试)。
-
-此外：面向 CI 的通过/失败阈值、逐区间实时输出、backlog 控制（使过载表现为丢弃而非
-虚高的延迟），以及通过 `--expected-status` 自定义成功状态码。
-
 ## 目录
 
 - [为什么选择 net-benchmark？](#为什么选择-net-benchmark)

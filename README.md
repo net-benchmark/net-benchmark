@@ -64,20 +64,6 @@ net-benchmark http load-test -t https://checkout.example.com/api/cart \
   --threshold 'p95_latency<400'
 ```
 
-### What's new in 0.5.2
-
-**Distributed load testing.** A single Python process is usually the bottleneck
-long before your target is. `--workers N` generates load from N separate
-processes with a synchronised start, and percentiles are recalculated from
-merged histograms rather than averaged — averaging P95s across workers gives a
-different number, not an approximation. Runs can also span several machines via
-a shared start barrier and the new `merge-load-test` collector. See
-[Load Testing](#-load-testing).
-
-Also: pass/fail thresholds for CI, per-interval live output, backlog control so
-overload shows up as drops instead of inflated latency, and user-defined success
-codes via `--expected-status`.
-
 ## Table of Contents
 
 - [Why net-benchmark?](#why-net-benchmark)
