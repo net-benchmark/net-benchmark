@@ -56,12 +56,42 @@ from net_benchmark.ssl_check.enumeration import (
 from net_benchmark.ssl_check.topology import MultiCertGroup
 
 __all__ = [
+    "ReportBranding",
     "SSLCSVExporter",
     "SSLExcelExporter",
     "SSLExportBundle",
     "SSLPDFExporter",
     "build_provenance",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Report branding — SaaS-side only
+# ---------------------------------------------------------------------------
+# Deliberately not exposed through any CLI flag. The capability lives here,
+# in the shared engine, so a SaaS layer imports and tests the exact same
+# PDF/Excel generation code the OSS CLI uses rather than re-implementing or
+# post-processing the output separately -- the same "build once" principle
+# every other engine addition in this project follows. Whether a caller is
+# allowed to set it (a paid-tier gate) is a decision for whatever imports
+# this, not for the exporter itself: `None` here means exactly today's
+# default output, and every CLI call site passes `None`.
+
+
+@dataclass
+class ReportBranding:
+    """Optional PDF/Excel report customization. `None` at any call site
+    (every one the CLI itself uses) means unchanged default output.
+
+    `logo_bytes` is raw image bytes, not a file path — a SaaS caller has
+    an uploaded logo in memory, not a filesystem location, and embedding
+    by path would mean resolving and trusting a path from user input.
+    """
+
+    report_title: str = "SSL/TLS Report"
+    organization_name: Optional[str] = None
+    logo_bytes: Optional[bytes] = None
+    logo_mime_type: str = "image/png"
 
 
 # ---------------------------------------------------------------------------
@@ -560,17 +590,23 @@ class SSLExcelExporter:
         threshold_results: Optional[Dict[str, List[ThresholdResult]]] = None,
         provenance: Optional[Dict[str, Any]] = None,
         include_charts: bool = True,
+        branding: Optional[ReportBranding] = None,
     ) -> None:
         workbook = Workbook()
         default = workbook.active
         if default is not None:
             workbook.remove(default)
 
+        if branding:
+            workbook.properties.title = branding.report_title
+            if branding.organization_name:
+                workbook.properties.creator = branding.organization_name
+
         temp_dir: Optional[str] = None
         chart_paths: List[str] = []
 
         try:
-            SSLExcelExporter._add_summary_sheet(workbook, analyzer)
+            SSLExcelExporter._add_summary_sheet(workbook, analyzer, branding)
             SSLExcelExporter._add_grade_sheet(workbook, results)
             SSLExcelExporter._add_expiry_timeline_sheet(workbook, results)
             SSLExcelExporter._add_certificate_sheet(workbook, results)
@@ -606,7 +642,11 @@ class SSLExcelExporter:
                     pass
 
     @staticmethod
-    def _add_summary_sheet(workbook: Workbook, analyzer: SSLAnalyzer) -> None:
+    def _add_summary_sheet(
+        workbook: Workbook,
+        analyzer: SSLAnalyzer,
+        branding: Optional[ReportBranding] = None,
+    ) -> None:
         rows: List[Dict[str, Any]] = []
         for stats in analyzer.get_target_statistics():
             rows.append(
@@ -636,6 +676,23 @@ class SSLExcelExporter:
                 }
             )
         add_simple_table_sheet(workbook, "Summary", pd.DataFrame(rows))
+
+        if branding:
+            sheet = workbook["Summary"]
+            sheet.insert_rows(1, amount=2)
+            sheet["A1"] = branding.report_title
+            sheet["A1"].font = Font(bold=True, size=14)
+            if branding.organization_name:
+                sheet["A2"] = branding.organization_name
+            if branding.logo_bytes:
+                import io as _io
+
+                from openpyxl.drawing.image import Image as XLImage
+
+                logo = XLImage(_io.BytesIO(branding.logo_bytes))
+                logo.height = 40
+                logo.width = 120
+                sheet.add_image(logo, "D1")
 
     @staticmethod
     def _add_grade_sheet(workbook: Workbook, results: Sequence[SSLResult]) -> None:
@@ -952,6 +1009,7 @@ class SSLPDFExporter:
         analyzer: SSLAnalyzer,
         output_path: str,
         provenance: Optional[Dict[str, Any]] = None,
+        branding: Optional[ReportBranding] = None,
     ) -> None:
         try:
             from weasyprint import HTML
@@ -962,7 +1020,7 @@ class SSLPDFExporter:
             ) from exc
 
         html = SSLPDFExporter._generate_html(
-            results, analyzer, provenance or build_provenance()
+            results, analyzer, provenance or build_provenance(), branding
         )
         HTML(string=html).write_pdf(output_path)
 
@@ -971,6 +1029,7 @@ class SSLPDFExporter:
         results: Sequence[SSLResult],
         analyzer: SSLAnalyzer,
         provenance: Dict[str, Any],
+        branding: Optional[ReportBranding] = None,
     ) -> str:
         overall = analyzer.get_overall_statistics()
         stats_list = analyzer.get_target_statistics()
@@ -1058,8 +1117,24 @@ class SSLPDFExporter:
             else ""
         )
 
+        title = branding.report_title if branding else "SSL/TLS Report"
+        byline = (
+            f'<p class="meta">{branding.organization_name}</p>'
+            if branding and branding.organization_name
+            else ""
+        )
+        logo_html = ""
+        if branding and branding.logo_bytes:
+            import base64
+
+            encoded = base64.b64encode(branding.logo_bytes).decode("ascii")
+            logo_html = (
+                f'<img src="data:{branding.logo_mime_type};base64,{encoded}" '
+                'style="max-height:48px;max-width:220px;" alt="logo">'
+            )
+
         return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>SSL/TLS Report</title>
+<html><head><meta charset="utf-8"><title>{title}</title>
 <style>
 body {{ font-family: sans-serif; font-size: 11px; }}
 h1 {{ font-size: 20px; }}
@@ -1071,7 +1146,9 @@ th {{ background: #e0e0e0; }}
 .ok {{ background: #c6efce; }}
 .meta {{ color: #666; font-size: 10px; }}
 </style></head><body>
-<h1>SSL/TLS Report</h1>
+{logo_html}
+<h1>{title}</h1>
+{byline}
 <p class="meta">Generated {provenance.get('retrieved_at')} &middot;
 trust store {provenance.get('trust_store')}
 {provenance.get('trust_store_version') or 'version unknown'} &middot;
