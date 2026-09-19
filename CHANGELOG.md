@@ -1,14 +1,3 @@
-## v0.6.1 (2026-09-19)
-
-### Feat
-
-- **ssl_check**: chain of trust, revocation, enumeration, ct transparency, linting, topology checks
-- **ci**: delete per-arch source tags after manifest publish
-
-### Fix
-
-- **docs**: pin Docker Image Version badge to the latest tag explicitly
-
 ## v0.6.0 (2026-09-10)
 
 ### BREAKING CHANGE
