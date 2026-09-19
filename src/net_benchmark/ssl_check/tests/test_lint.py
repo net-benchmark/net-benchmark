@@ -46,7 +46,7 @@ def _realistic_dv_leaf_der() -> bytes:
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Test Org"),
         ]
     )
-    
+
     leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     leaf_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "example.com")])
     leaf_cert = (
