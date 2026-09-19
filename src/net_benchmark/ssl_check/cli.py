@@ -5,12 +5,12 @@ Mirrors `http_bench.cli` and `dns_benchmark.cli`: a `click.Group`, shared
 pattern with typo detection against a known metric set, and exports evaluated
 before the threshold gate so a failing run still leaves its artifacts behind.
 
-Deliberately one command, `ssl check`. The roadmap's 0.6.1 items (version and
-cipher enumeration, chain-of-trust reporting, revocation, baseline
-monitoring) each want a different default shape of output — a `versions`
-table is not a `check` row — and are better served by their own subcommands
-when they land than by overloading this one with flags for features that
-don't exist yet.
+Deliberately one command, `ssl check`, with each 0.6.1 capability (chain
+validation, revocation, version/cipher enumeration, CT log trust, CA/B
+linting, dual-stack and virtual-hosting checks) as its own opt-in flag on
+that command rather than a separate subcommand — each adds fields to the
+same per-target result and the same export formats, not a differently-shaped
+output that would need its own command and its own exporters.
 """
 
 from __future__ import annotations
@@ -50,6 +50,9 @@ from net_benchmark.ssl_check.exporters import (
     build_provenance,
 )
 from net_benchmark.ssl_check.handshake import StartTLSProtocol, TLSVersion
+from net_benchmark.ssl_check.topology import (
+    detect_virtual_hosting as compute_virtual_hosting_groups,
+)
 from net_benchmark.utils.helpers import create_progress_bar
 from net_benchmark.utils.messages import error, info, success, summary_box, warning
 
@@ -380,6 +383,124 @@ def _parse_starttls_override(raw: Optional[str]) -> Optional[StartTLSProtocol]:
     help="Flag a certificate with no OCSP or CRL URL. Certificates within "
     "the CA/B short-lived exemption are never flagged by this.",
 )
+# ── chain of trust (roadmap discussion #45, SSL items 11-16) ──
+@click.option(
+    "--verify-chain",
+    is_flag=True,
+    help="Fetch missing intermediates via AIA and validate the chain "
+    "against a trust store. Adds network calls beyond the target itself; "
+    "off by default.",
+)
+@click.option(
+    "--trust-anchor-file",
+    "trust_anchor_files",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Extra PEM file of trust anchors, added to the certifi bundle. "
+    "Repeatable. Only used with --verify-chain.",
+)
+@click.option(
+    "--chain-timeout",
+    default=10.0,
+    show_default=True,
+    help="Timeout in seconds for each AIA certificate fetch.",
+)
+@click.option(
+    "--max-chain-depth",
+    default=8,
+    show_default=True,
+    help="Maximum number of AIA hops to follow while completing a chain.",
+)
+@click.option(
+    "--check-cross-sign",
+    is_flag=True,
+    help="With --verify-chain, also build an independent AIA-only path and "
+    "flag when it trusts a different root than the peer-supplied chain "
+    "does. Costs an extra AIA fetch even when the peer's own chain already "
+    "validates; see the chain.py module docstring for what this heuristic "
+    "does and does not catch.",
+)
+@click.option(
+    "--require-valid-chain",
+    is_flag=True,
+    help="Flag a certificate whose chain did not validate against the "
+    "trust store. Only meaningful with --verify-chain; ignored otherwise.",
+)
+# ── revocation (roadmap discussion #45, SSL items 17-18) ──
+@click.option(
+    "--check-revocation",
+    is_flag=True,
+    help="Query OCSP and CRL for each certificate's own revocation status. "
+    "Independent of --verify-chain (only needs the immediate issuer, fetched "
+    "via AIA if not already available from --verify-chain); adds network "
+    "calls beyond the target itself, off by default.",
+)
+@click.option(
+    "--ocsp-timeout",
+    default=10.0,
+    show_default=True,
+    help="Timeout in seconds for each OCSP responder query.",
+)
+@click.option(
+    "--crl-timeout",
+    default=10.0,
+    show_default=True,
+    help="Timeout in seconds for each CRL fetch.",
+)
+@click.option(
+    "--allow-revoked",
+    is_flag=True,
+    help="Do not flag a certificate that OCSP or CRL reports as revoked.",
+)
+# ── protocol & cipher enumeration (0.6.1 items 1-3) ──
+@click.option(
+    "--enumerate-protocol",
+    is_flag=True,
+    help="Enumerate supported TLS versions and (unless --no-enumerate-ciphers) "
+    "TLS 1.2-and-below cipher suites, with an A-F strength rating per suite. "
+    "5-70 extra handshakes against the target per scan; off by default.",
+)
+@click.option(
+    "--enumerate-ciphers/--no-enumerate-ciphers",
+    default=True,
+    help="With --enumerate-protocol, whether to also probe TLS 1.2-and-below "
+    "cipher suites (5-70 handshakes) or only enumerate versions (5 "
+    "handshakes). Ciphers on by default.",
+)
+# ── CT log identification & trust status (0.6.1 items 10, 12) ──
+@click.option(
+    "--check-ct-logs",
+    is_flag=True,
+    help="Resolve each certificate's embedded SCTs against the CT log "
+    "registry and report whether the issuing logs are currently trusted. "
+    "Fetches Chrome's published log list (cached on disk) once per scan.",
+)
+# ── CA/B Baseline Requirements linting (0.6.1 item 37) ──
+@click.option(
+    "--lint",
+    is_flag=True,
+    help="Lint each certificate against the CA/Browser Forum TLS Baseline "
+    "Requirements via pkilint. Requires the [lint] extra "
+    "(pip install 'net-benchmark[lint]'); reports as unavailable, not an "
+    "error, when not installed. No network cost — CPU only.",
+)
+# ── IPv4/IPv6 certificate consistency (0.6.1 item 17) ──
+@click.option(
+    "--check-dual-stack",
+    is_flag=True,
+    help="For dual-stack targets, compare the certificate served over IPv4 "
+    "against IPv6 for the same hostname. Skipped for --resolve-pinned "
+    "targets, which have no families left to compare.",
+)
+# ── virtual host / multi-cert detection (0.6.1 item 16) ──
+@click.option(
+    "--detect-virtual-hosting",
+    is_flag=True,
+    help="Report, for any IP scanned under more than one hostname in this "
+    "run, how many distinct certificates it served. Descriptive, not a "
+    "pass/fail check — shared virtual hosting is normal. No network cost, "
+    "computed from results already collected.",
+)
 # ── item 55 ──
 @click.option(
     "--as-of",
@@ -448,6 +569,22 @@ def check(
     allow_weak_signature: bool,
     allow_deprecated_tls: bool,
     require_revocation_source: bool,
+    verify_chain: bool,
+    trust_anchor_files: Tuple[str, ...],
+    chain_timeout: float,
+    max_chain_depth: int,
+    check_cross_sign: bool,
+    require_valid_chain: bool,
+    check_revocation: bool,
+    ocsp_timeout: float,
+    crl_timeout: float,
+    allow_revoked: bool,
+    enumerate_protocol: bool,
+    enumerate_ciphers: bool,
+    check_ct_logs: bool,
+    lint: bool,
+    check_dual_stack: bool,
+    detect_virtual_hosting: bool,
     as_of: Optional[str],
     output: str,
     formats: str,
@@ -556,6 +693,19 @@ def check(
             send_sni=not no_sni,
             server_hostname=sni_hostname,
             as_of=evaluation_instant,
+            verify_chain=verify_chain,
+            chain_timeout=chain_timeout,
+            max_chain_depth=max_chain_depth,
+            trust_anchor_paths=[Path(p) for p in trust_anchor_files] or None,
+            check_cross_sign=check_cross_sign,
+            check_revocation=check_revocation,
+            ocsp_timeout=ocsp_timeout,
+            crl_timeout=crl_timeout,
+            enumerate_protocol=enumerate_protocol,
+            enumerate_ciphers=enumerate_ciphers,
+            check_ct_logs=check_ct_logs,
+            lint=lint,
+            check_dual_stack=check_dual_stack,
         )
 
         progress_bar = None
@@ -573,7 +723,13 @@ def check(
             engine.set_progress_callback(_progress_cb)
 
         async def _run() -> List[SSLResult]:
-            return await engine.check_targets(target_list)
+            try:
+                return await engine.check_targets(target_list)
+            finally:
+                # No-op when --verify-chain was never passed — aclose() only
+                # tears down a client that _ensure_async_primitives() only
+                # ever creates when verify_chain is True.
+                await engine.aclose()
 
         results = asyncio.run(_run())
 
@@ -597,6 +753,8 @@ def check(
             reject_weak_signature=not allow_weak_signature,
             reject_deprecated_tls=not allow_deprecated_tls,
             require_revocation_source=require_revocation_source,
+            require_valid_chain=require_valid_chain,
+            reject_revoked=not allow_revoked,
         )
         for result in results:
             evaluate_policy(result, policy)
@@ -604,6 +762,19 @@ def check(
         # ── analysis ─────────────────────────────────────────────────────
         analyzer = SSLAnalyzer(results)
         overall = analyzer.get_overall_statistics()
+
+        # ── virtual host / multi-cert detection (0.6.1 item 16) ───────────
+        virtual_hosting_groups = (
+            compute_virtual_hosting_groups(results) if detect_virtual_hosting else []
+        )
+        if virtual_hosting_groups and not quiet:
+            click.echo(warning("Virtual hosting detected:"))
+            for group in virtual_hosting_groups:
+                click.echo(
+                    f"  {group.ip}: {len(group.hosts)} hostnames, "
+                    f"{group.distinct_certificate_count} distinct certificate(s) "
+                    f"({', '.join(group.hosts)})"
+                )
 
         if not quiet:
             expiry_min = overall.get("cert_expiry_days_min")
@@ -687,6 +858,7 @@ def check(
                     str(output_path / f"{base}.json"),
                     threshold_results=threshold_report or None,
                     provenance=provenance,
+                    virtual_hosting=virtual_hosting_groups or None,
                 )
                 if export_progress:
                     export_progress.update(1)

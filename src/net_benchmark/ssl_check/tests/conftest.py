@@ -157,6 +157,8 @@ async def _start_tls_server(
     *,
     max_version: Optional[ssl.TLSVersion] = None,
     min_version: Optional[ssl.TLSVersion] = None,
+    cipher_string: Optional[str] = None,
+    honor_client_cipher_order: bool = False,
     hold_open_s: float = 0.2,
 ) -> TLSServerHandle:
     """Start a bare TLS server: accept, hold briefly, close.
@@ -165,6 +167,12 @@ async def _start_tls_server(
     probe's second handshake before the server tears the listener down when
     the test's `async with` block exits, without holding every test open
     unnecessarily long.
+
+    `honor_client_cipher_order` (item 21's test support): Python's
+    `SSLContext(PROTOCOL_TLS_SERVER)` sets `OP_CIPHER_SERVER_PREFERENCE` by
+    default — confirmed empirically before adding this, not assumed — so a
+    server honouring the client's order at all is the case that needs an
+    explicit override here, not the default one.
     """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(str(cert_path), str(key_path))
@@ -172,6 +180,10 @@ async def _start_tls_server(
         context.maximum_version = max_version
     if min_version is not None:
         context.minimum_version = min_version
+    if cipher_string is not None:
+        context.set_ciphers(cipher_string)
+    if honor_client_cipher_order:
+        context.options &= ~ssl.OP_CIPHER_SERVER_PREFERENCE
 
     async def handle(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -218,13 +230,20 @@ async def tls_server(
         cert: Optional[Tuple[Path, Path, x509.Certificate]] = None,
         max_version: Optional[ssl.TLSVersion] = None,
         min_version: Optional[ssl.TLSVersion] = None,
+        cipher_string: Optional[str] = None,
+        honor_client_cipher_order: bool = False,
         **cert_kwargs: object,
     ) -> TLSServerHandle:
         if cert is None:
             cert = cert_factory(**cert_kwargs)
         cert_path, key_path, _ = cert
         handle = await _start_tls_server(
-            cert_path, key_path, max_version=max_version, min_version=min_version
+            cert_path,
+            key_path,
+            max_version=max_version,
+            min_version=min_version,
+            cipher_string=cipher_string,
+            honor_client_cipher_order=honor_client_cipher_order,
         )
         handles.append(handle)
         return handle

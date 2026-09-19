@@ -420,6 +420,65 @@ class UsageAudit:
         }
 
 
+class ValidationLevel(str, Enum):
+    """Certificate validation level asserted via CertificatePolicies (item 14)."""
+
+    DOMAIN_VALIDATED = "domain_validated"
+    ORGANIZATION_VALIDATED = "organization_validated"
+    INDIVIDUAL_VALIDATED = "individual_validated"
+    EXTENDED_VALIDATION = "extended_validation"
+    # Not "domain-validated by default" — the honest answer when neither the
+    # CA/B Forum's own reserved OIDs nor any caller-supplied CA-specific OID
+    # is present. See `detect_validation_level`'s docstring on why this is
+    # common even for correctly-issued, appropriately-validated certificates.
+    UNKNOWN = "unknown"
+
+
+# CA/Browser Forum's own reserved Certificate Policy OIDs (item 14), verified
+# against the Forum's Object Registry (cabforum.org/resources/object-registry)
+# and the Baseline Requirements document itself, not guessed:
+#   2.23.140.1.1    extended-validation
+#   2.23.140.1.2.1  domain-validated   (baseline-requirements arc)
+#   2.23.140.1.2.2  organization-validated
+#   2.23.140.1.2.3  individual-validated
+_CABF_POLICY_OIDS: Dict[str, ValidationLevel] = {
+    "2.23.140.1.1": ValidationLevel.EXTENDED_VALIDATION,
+    "2.23.140.1.2.1": ValidationLevel.DOMAIN_VALIDATED,
+    "2.23.140.1.2.2": ValidationLevel.ORGANIZATION_VALIDATED,
+    "2.23.140.1.2.3": ValidationLevel.INDIVIDUAL_VALIDATED,
+}
+
+# Worst-to-best is not the right order here — EV asserted alongside a generic
+# DV OID (which happens) should report EV, the *strongest* asserted claim,
+# not the weakest. Ordered strongest-first for that reason.
+_VALIDATION_LEVEL_PRIORITY = [
+    ValidationLevel.EXTENDED_VALIDATION,
+    ValidationLevel.INDIVIDUAL_VALIDATED,
+    ValidationLevel.ORGANIZATION_VALIDATED,
+    ValidationLevel.DOMAIN_VALIDATED,
+]
+
+
+@dataclass
+class SignedCertificateTimestampInfo:
+    """One parsed entry from the embedded SCT list extension (item 11)."""
+
+    log_id_hex: str
+    timestamp: datetime
+    version: str
+    entry_type: str
+    signature_algorithm: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "log_id_hex": self.log_id_hex,
+            "timestamp": self.timestamp.isoformat(),
+            "version": self.version,
+            "entry_type": self.entry_type,
+            "signature_algorithm": self.signature_algorithm,
+        }
+
+
 @dataclass
 class Fingerprints:
     """Certificate and public-key fingerprints (item 9).
@@ -500,6 +559,13 @@ class CertificateInfo:
     # --- usage (item 36) ---
     usage: UsageAudit = field(default_factory=UsageAudit)
 
+    # --- validation level (item 14) ---
+    validation_level: ValidationLevel = ValidationLevel.UNKNOWN
+    validation_level_policy_oids: List[str] = field(default_factory=list)
+
+    # --- certificate transparency (item 11) ---
+    scts: List[SignedCertificateTimestampInfo] = field(default_factory=list)
+
     # --- self-signed (item 10) ---
     # Issuer DN equals subject DN. Named `self_issued` rather than
     # `self_signed` because a matching DN does NOT prove the certificate signed
@@ -543,6 +609,9 @@ class CertificateInfo:
             "lifetime": self.lifetime.to_dict() if self.lifetime else None,
             "revocation": self.revocation.to_dict(),
             "usage": self.usage.to_dict(),
+            "validation_level": self.validation_level.value,
+            "validation_level_policy_oids": list(self.validation_level_policy_oids),
+            "scts": [sct.to_dict() for sct in self.scts],
             "self_issued": self.self_issued,
             "self_signed": self.self_signed,
             "parse_errors": list(self.parse_errors),
@@ -976,6 +1045,95 @@ def extract_revocation_endpoints(
     return endpoints
 
 
+def detect_validation_level(
+    cert: x509.Certificate,
+    errors: List[str],
+    *,
+    extra_policy_oids: Optional[Dict[str, ValidationLevel]] = None,
+) -> Tuple[ValidationLevel, List[str]]:
+    """DV/OV/IV/EV detection via the CertificatePolicies extension (item 14).
+
+    Only the CA/Browser Forum's own reserved OIDs are checked by default —
+    verified against the Forum's own Object Registry, not guessed (see the
+    constant above). Most commercial CAs assert Baseline Requirements
+    compliance through their own proprietary policy OIDs instead of these
+    generic ones — the Forum's own FAQ says as much ("most commercial CAs
+    maintain their own CP OIDs") — so a certificate from a CA that does this
+    reports `UNKNOWN` here, not a guessed `DOMAIN_VALIDATED`. That is the
+    honest answer: "not determinable from the generic OIDs alone", not "this
+    CA skipped validation". `extra_policy_oids` lets a caller extend the
+    mapping with CA-specific OIDs they have separately verified, without
+    this function hardcoding a vendor OID list it has no way to verify here.
+
+    Returns (level, found_policy_oids) — the OIDs are returned regardless of
+    whether any were recognised, so a result can show what was actually
+    asserted even when the level itself is `UNKNOWN`.
+    """
+    table = dict(_CABF_POLICY_OIDS)
+    if extra_policy_oids:
+        table.update(extra_policy_oids)
+
+    try:
+        policies = cert.extensions.get_extension_for_class(
+            x509.CertificatePolicies
+        ).value
+    except x509.ExtensionNotFound:
+        return ValidationLevel.UNKNOWN, []
+    except ValueError as exc:
+        errors.append(f"certificate policies extension unparseable: {exc}")
+        return ValidationLevel.UNKNOWN, []
+
+    found_oids = [p.policy_identifier.dotted_string for p in policies]
+    levels = {table[oid] for oid in found_oids if oid in table}
+    for level in _VALIDATION_LEVEL_PRIORITY:
+        if level in levels:
+            return level, found_oids
+    return ValidationLevel.UNKNOWN, found_oids
+
+
+def extract_scts(
+    cert: x509.Certificate, errors: List[str]
+) -> List[SignedCertificateTimestampInfo]:
+    """Embedded SCTs from the PrecertificateSignedCertificateTimestamps
+    extension (item 11) — presence and content only.
+
+    Not covered here (item 12, a separate piece of work): resolving each
+    `log_id_hex` to a named log and a trust status. That needs a known-logs
+    dataset (e.g. Google's published CT log list) this module does not fetch
+    — every log this function sees is reported by its raw ID, never guessed
+    at or silently matched against a hardcoded, unverifiable name list.
+    """
+    scts: List[SignedCertificateTimestampInfo] = []
+    try:
+        sct_list = cert.extensions.get_extension_for_class(
+            x509.PrecertificateSignedCertificateTimestamps
+        ).value
+    except x509.ExtensionNotFound:
+        return scts
+    except ValueError as exc:
+        errors.append(f"SCT list extension unparseable: {exc}")
+        return scts
+
+    for sct in sct_list:
+        # `sct.timestamp` is naive (cryptography does not attach tzinfo,
+        # unlike its own `*_utc` OCSP/CRL accessors) but is always UTC per
+        # RFC 6962 -- made explicit here rather than leaving every consumer
+        # to independently know that.
+        timestamp = sct.timestamp
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        scts.append(
+            SignedCertificateTimestampInfo(
+                log_id_hex=sct.log_id.hex(),
+                timestamp=timestamp,
+                version=sct.version.name,
+                entry_type=sct.entry_type.name,
+                signature_algorithm=sct.signature_algorithm.name,
+            )
+        )
+    return scts
+
+
 def audit_usage(cert: x509.Certificate, errors: List[str]) -> UsageAudit:
     """keyUsage / extendedKeyUsage / basicConstraints audit (item 36)."""
     audit = UsageAudit()
@@ -1131,7 +1289,12 @@ def parse_certificate(
         lifetime=audit_lifetime(cert, now=now),
         revocation=extract_revocation_endpoints(cert, errors),
         usage=audit_usage(cert, errors),
+        scts=extract_scts(cert, errors),
         parse_errors=errors,
+    )
+
+    info.validation_level, info.validation_level_policy_oids = detect_validation_level(
+        cert, errors
     )
 
     info.self_issued = cert.subject == cert.issuer

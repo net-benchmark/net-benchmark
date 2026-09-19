@@ -43,6 +43,7 @@ from net_benchmark.ssl_check.exporters import (
     SSLPDFExporter,
     build_provenance,
 )
+from net_benchmark.ssl_check.handshake import HandshakeStatus, StartTLSProtocol
 
 from .conftest import TLSServerHandle
 
@@ -456,3 +457,249 @@ class TestSSLPDFExporter:
             with pytest.raises(RuntimeError, match=r"\[pdf\] extra"):
                 SSLPDFExporter.export_results(small_fleet, analyzer, str(out))
         assert not out.exists()
+
+
+# ---------------------------------------------------------------------------
+# Per-host grade (0.6.1 items 19-20)
+# ---------------------------------------------------------------------------
+
+
+def _base_result(target: str = "example.com", port: int = 443) -> SSLResult:
+    return SSLResult(
+        host=target,
+        port=port,
+        starttls=StartTLSProtocol.NONE,
+        status=HandshakeStatus.OK,
+        start_time=0.0,
+        end_time=0.0,
+        measured=True,
+    )
+
+
+class TestHostGrade:
+    def test_nothing_attempted_is_none(self) -> None:
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+
+        grades = _compute_host_grades([_base_result()])
+        assert len(grades) == 1
+        assert grades[0].overall_ok is None
+
+    def test_chain_verified_true_is_ok(self) -> None:
+        from net_benchmark.ssl_check.chain import ChainAudit
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+
+        result = _base_result()
+        result.chain_audit = ChainAudit(attempted=True, verified=True)
+        grades = _compute_host_grades([result])
+        assert grades[0].overall_ok is True
+        assert grades[0].chain_verified is True
+
+    def test_chain_verified_false_is_fail(self) -> None:
+        from net_benchmark.ssl_check.chain import ChainAudit
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+
+        result = _base_result()
+        result.chain_audit = ChainAudit(
+            attempted=True, verified=False, verification_error="untrusted root"
+        )
+        grades = _compute_host_grades([result])
+        assert grades[0].overall_ok is False
+        assert grades[0].chain_error == "untrusted root"
+
+    def test_revoked_true_is_fail(self) -> None:
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+        from net_benchmark.ssl_check.revocation import CRLStatus, RevocationAudit
+
+        result = _base_result()
+        result.revocation_audit = RevocationAudit(
+            attempted=True, crl_status=CRLStatus.REVOKED
+        )
+        grades = _compute_host_grades([result])
+        assert grades[0].revoked is True
+        assert grades[0].overall_ok is False
+
+    def test_ct_untrusted_is_fail(self) -> None:
+        from net_benchmark.ssl_check.ct import CTAudit
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+
+        result = _base_result()
+        result.ct_audit = CTAudit(attempted=True, sct_trust=[])
+        # all_trusted is None with no SCTs -- simulate an explicit untrusted
+        # verdict instead via a fake attribute-compatible object is overkill;
+        # exercise via the real property using a minimal SCTTrust stand-in.
+        from datetime import datetime, timezone
+
+        from net_benchmark.ssl_check.certificate import (
+            SignedCertificateTimestampInfo,
+        )
+        from net_benchmark.ssl_check.ct import SCTTrust
+
+        sct = SignedCertificateTimestampInfo(
+            log_id_hex="00" * 32,
+            timestamp=datetime.now(timezone.utc),
+            version="v1",
+            entry_type="PRE_CERTIFICATE",
+            signature_algorithm="ECDSA",
+        )
+        result.ct_audit = CTAudit(
+            attempted=True, sct_trust=[SCTTrust(sct=sct, log=None, trusted=False)]
+        )
+        grades = _compute_host_grades([result])
+        assert grades[0].ct_all_trusted is False
+        assert grades[0].overall_ok is False
+
+    def test_lint_warning_only_is_ok(self) -> None:
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+        from net_benchmark.ssl_check.lint import (
+            FindingSeverity,
+            LintAudit,
+            LintAvailability,
+            LintFinding,
+        )
+
+        result = _base_result()
+        result.lint_audit = LintAudit(
+            attempted=True,
+            availability=LintAvailability.AVAILABLE,
+            findings=[
+                LintFinding(
+                    severity=FindingSeverity.WARNING,
+                    code="x",
+                    message=None,
+                    node_path="cert",
+                )
+            ],
+        )
+        grades = _compute_host_grades([result])
+        assert grades[0].lint_worst_severity == "warning"
+        assert grades[0].overall_ok is True
+
+    def test_lint_error_is_fail(self) -> None:
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+        from net_benchmark.ssl_check.lint import (
+            FindingSeverity,
+            LintAudit,
+            LintAvailability,
+            LintFinding,
+        )
+
+        result = _base_result()
+        result.lint_audit = LintAudit(
+            attempted=True,
+            availability=LintAvailability.AVAILABLE,
+            findings=[
+                LintFinding(
+                    severity=FindingSeverity.ERROR,
+                    code="x",
+                    message=None,
+                    node_path="cert",
+                )
+            ],
+        )
+        grades = _compute_host_grades([result])
+        assert grades[0].overall_ok is False
+
+    def test_worst_case_across_multiple_results_for_same_target(self) -> None:
+        """One result says the chain verified, another (a later sample)
+        says it didn't -- the target's grade reports the failure, not
+        whichever result happened to be processed first."""
+        from net_benchmark.ssl_check.chain import ChainAudit
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+
+        good = _base_result()
+        good.chain_audit = ChainAudit(attempted=True, verified=True)
+        bad = _base_result()
+        bad.chain_audit = ChainAudit(attempted=True, verified=False)
+
+        grades = _compute_host_grades([good, bad])
+        assert len(grades) == 1  # same target, one grade
+        assert grades[0].chain_verified is False
+
+    def test_weakest_cipher_across_results(self) -> None:
+        from net_benchmark.ssl_check.enumeration import (
+            CipherStrength,
+            EnumerationResult,
+        )
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+
+        strong = _base_result()
+        strong.enumeration = EnumerationResult(attempted=True, ciphers=[])
+        # weakest_supported_cipher_strength is a computed property from
+        # `ciphers`; simplest reliable way to get a fixed value here is a
+        # monkeypatch-free construction via a supported cipher list.
+        from net_benchmark.ssl_check.enumeration import CipherSupport
+
+        strong.enumeration.ciphers = [
+            CipherSupport("A-SUITE", None, True, CipherStrength.A, "strong")
+        ]
+        weak = _base_result()
+        weak.enumeration = EnumerationResult(
+            attempted=True,
+            ciphers=[CipherSupport("C-SUITE", None, True, CipherStrength.C, "weak")],
+        )
+        grades = _compute_host_grades([strong, weak])
+        assert grades[0].weakest_cipher_strength == "C"
+
+    def test_different_targets_produce_separate_grades(self) -> None:
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+
+        a = _base_result(target="a.example.com")
+        b = _base_result(target="b.example.com")
+        grades = _compute_host_grades([a, b])
+        assert {g.target for g in grades} == {"a.example.com:443", "b.example.com:443"}
+
+    def test_policy_failures_included_in_overall(self) -> None:
+        from net_benchmark.ssl_check.exporters import _compute_host_grades
+
+        result = _base_result()
+        result.policy_failures = ["deprecated TLS version"]
+        grades = _compute_host_grades([result])
+        assert grades[0].overall_ok is False
+        assert grades[0].policy_failures == ["deprecated TLS version"]
+
+
+class TestPDFFindingsSection:
+    def test_findings_section_present_when_checks_ran(
+        self, small_fleet: List[SSLResult]
+    ) -> None:
+        from net_benchmark.ssl_check.chain import ChainAudit
+
+        # small_fleet's results have no chain_audit by default; attach one
+        # so the findings section has something to render.
+        small_fleet[0].chain_audit = ChainAudit(attempted=True, verified=True)
+        analyzer = SSLAnalyzer(small_fleet)
+        html = SSLPDFExporter._generate_html(small_fleet, analyzer, build_provenance())
+        assert "<h2>Findings summary</h2>" in html
+        assert "verified" in html
+
+    def test_no_findings_section_when_nothing_attempted(
+        self, small_fleet: List[SSLResult]
+    ) -> None:
+        analyzer = SSLAnalyzer(small_fleet)
+        html = SSLPDFExporter._generate_html(small_fleet, analyzer, build_provenance())
+        assert "<h2>Findings summary</h2>" not in html
+
+
+class TestExcelGradeSheet:
+    def test_grade_sheet_present(
+        self, small_fleet: List[SSLResult], tmp_path: Path
+    ) -> None:
+        from net_benchmark.ssl_check.chain import ChainAudit
+
+        small_fleet[0].chain_audit = ChainAudit(
+            attempted=True, verified=False, verification_error="test error"
+        )
+        analyzer = SSLAnalyzer(small_fleet)
+        out = tmp_path / "report.xlsx"
+        SSLExcelExporter.export_results(small_fleet, analyzer, str(out))
+        wb = load_workbook(str(out))
+        assert "Per-Host Grade" in wb.sheetnames
+        ws = wb["Per-Host Grade"]
+        rows = list(ws.iter_rows(values_only=True))
+        assert rows[0][0] == "Target"
+        # Find the row for the target we attached a failing chain to.
+        target_col = rows[0].index("Target")
+        overall_col = rows[0].index("Overall")
+        matching = [r for r in rows[1:] if r[target_col] == small_fleet[0].target]
+        assert matching
+        assert matching[0][overall_col] == "FAIL"

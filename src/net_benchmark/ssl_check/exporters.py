@@ -27,7 +27,7 @@ import csv
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -49,6 +49,11 @@ from net_benchmark.http_bench.analysis import ThresholdResult
 from net_benchmark.ssl_check.analysis import SSLAnalyzer, expiry_timeline
 from net_benchmark.ssl_check.certificate import ExpiryAlert
 from net_benchmark.ssl_check.core import SSLResult
+from net_benchmark.ssl_check.enumeration import (
+    DEFAULT_VERSION_CANDIDATES,
+    EnumerationResult,
+)
+from net_benchmark.ssl_check.topology import MultiCertGroup
 
 __all__ = [
     "SSLCSVExporter",
@@ -103,6 +108,142 @@ def build_provenance(
 # ---------------------------------------------------------------------------
 # Row flattening
 # ---------------------------------------------------------------------------
+
+# Oldest-to-newest rank, reusing enumeration.py's own ordering rather than a
+# second one that could silently drift from it. Lexicographic string
+# comparison on version names ("TLSv1.3" > "TLSv1.2") happens to agree with
+# this for the current five version strings, which is exactly the kind of
+# accidental correctness not worth relying on — an explicit rank is used
+# instead of `max()` on the strings themselves.
+_VERSION_RANK = {
+    version: i for i, (version, _) in enumerate(DEFAULT_VERSION_CANDIDATES)
+}
+
+
+def _highest_supported_version(enumeration: EnumerationResult) -> Optional[str]:
+    supported = [v for v in enumeration.versions if v.supported]
+    if not supported:
+        return None
+    highest = max(supported, key=lambda v: _VERSION_RANK.get(v.version, -1))
+    return highest.version.value
+
+
+# ---------------------------------------------------------------------------
+# Per-host grade (0.6.1 items 19-20)
+# ---------------------------------------------------------------------------
+#
+# Deliberately not routed through SSLAnalyzer/HostStats: that pipeline
+# aggregates *rates across samples* (e.g. "70% of handshake samples
+# negotiated TLS 1.3"), which fits facts that can genuinely vary attempt to
+# attempt. chain_audit/revocation_audit/ct_audit/lint_audit/enumeration each
+# run once per SSLResult, not once per handshake sample -- there is no
+# meaningful "rate" for "was the chain valid" the way there is for latency.
+# Computed straight from the SSLResult list instead, one grade per target,
+# worst-case across results when a target produced more than one (same
+# pattern HostStats.worst_expiry_alert already uses for the same reason:
+# a single bad result is the finding, not something an average should
+# smooth over).
+
+# Worst-first, so a target with any FATAL/ERROR-severity lint finding across
+# its results reports that, not a WARNING from a different result.
+_LINT_SEVERITY_PRIORITY = ["fatal", "error", "warning", "notice", "info", "debug"]
+_CIPHER_STRENGTH_PRIORITY = ["F", "C", "B", "A"]
+
+
+@dataclass
+class HostGrade:
+    """Per-target summary of the 0.6.1 opt-in checks, for the Excel grade
+    sheet and the PDF findings section. Every field is `None`/empty when the
+    corresponding check never ran for this target, not a false negative.
+    """
+
+    target: str
+    validation_level: Optional[str] = None
+    chain_verified: Optional[bool] = None
+    chain_error: Optional[str] = None
+    revoked: Optional[bool] = None
+    ct_all_trusted: Optional[bool] = None
+    weakest_cipher_strength: Optional[str] = None
+    lint_worst_severity: Optional[str] = None
+    lint_finding_count: int = 0
+    policy_failures: List[str] = field(default_factory=list)
+
+    @property
+    def overall_ok(self) -> Optional[bool]:
+        """False if any attempted check found a problem; True if every
+        attempted check passed cleanly; None if nothing here was attempted
+        at all (every field still at its default).
+        """
+        attempted = False
+        problems = bool(self.policy_failures)
+        if self.chain_verified is not None:
+            attempted = True
+            problems = problems or not self.chain_verified
+        if self.revoked is not None:
+            attempted = True
+            problems = problems or self.revoked
+        if self.ct_all_trusted is not None:
+            attempted = True
+            problems = problems or not self.ct_all_trusted
+        if self.lint_worst_severity in ("fatal", "error"):
+            attempted = True
+            problems = True
+        elif self.lint_worst_severity is not None:
+            attempted = True
+        if not attempted and not self.policy_failures:
+            return None
+        return not problems
+
+
+def _compute_host_grades(results: Sequence[SSLResult]) -> List[HostGrade]:
+    grades: Dict[str, HostGrade] = {}
+    for result in results:
+        grade = grades.setdefault(result.target, HostGrade(target=result.target))
+
+        if result.certificate is not None:
+            grade.validation_level = result.certificate.validation_level.value
+
+        if result.chain_audit is not None and result.chain_audit.attempted:
+            if grade.chain_verified is not False:
+                grade.chain_verified = result.chain_audit.verified
+                grade.chain_error = result.chain_audit.verification_error
+
+        if result.revocation_audit is not None and result.revocation_audit.attempted:
+            if result.revocation_audit.revoked is not None:
+                grade.revoked = bool(grade.revoked) or result.revocation_audit.revoked
+
+        if result.ct_audit is not None and result.ct_audit.attempted:
+            if result.ct_audit.all_trusted is not None:
+                grade.ct_all_trusted = (
+                    grade.ct_all_trusted is not False
+                ) and result.ct_audit.all_trusted
+
+        if result.enumeration is not None:
+            weakest = result.enumeration.weakest_supported_cipher_strength
+            if weakest is not None:
+                candidates = [
+                    c for c in (grade.weakest_cipher_strength, weakest.value) if c
+                ]
+                if candidates:
+                    grade.weakest_cipher_strength = min(
+                        candidates, key=_CIPHER_STRENGTH_PRIORITY.index
+                    )
+
+        if result.lint_audit is not None and result.lint_audit.attempted:
+            grade.lint_finding_count += len(result.lint_audit.findings)
+            severities = [f.severity.value for f in result.lint_audit.findings]
+            if grade.lint_worst_severity is not None:
+                severities.append(grade.lint_worst_severity)
+            for level in _LINT_SEVERITY_PRIORITY:
+                if level in severities:
+                    grade.lint_worst_severity = level
+                    break
+
+        for failure in result.policy_failures:
+            if failure not in grade.policy_failures:
+                grade.policy_failures.append(failure)
+
+    return list(grades.values())
 
 
 def _raw_rows(results: Sequence[SSLResult]) -> List[Dict[str, Any]]:
@@ -233,6 +374,117 @@ def _raw_rows(results: Sequence[SSLResult]) -> List[Dict[str, Any]]:
                     if certificate is not None and certificate.fingerprints
                     else None
                 ),
+                # --- validation level (0.6.1 item 14) and SCTs (item 11) ------
+                "cert_validation_level": (
+                    certificate.validation_level.value
+                    if certificate is not None
+                    else None
+                ),
+                "cert_sct_count": (
+                    len(certificate.scts) if certificate is not None else None
+                ),
+                # --- validated chain (roadmap discussion #45, items 11-16) --
+                # None throughout when the scan did not run with
+                # --verify-chain, same convention as the rest of this row: a
+                # check that did not run reports as "not evaluated", not as
+                # a failure.
+                "chain_verified": (
+                    result.chain_audit.verified
+                    if result.chain_audit is not None
+                    else None
+                ),
+                "chain_depth": (
+                    result.chain_audit.depth if result.chain_audit is not None else None
+                ),
+                "chain_missing_intermediate": (
+                    result.chain_audit.missing_intermediate
+                    if result.chain_audit is not None
+                    else None
+                ),
+                "chain_weak_hash": (
+                    result.chain_audit.weak_hash_in_chain
+                    if result.chain_audit is not None
+                    else None
+                ),
+                "chain_cross_signed": (
+                    result.chain_audit.cross_signed
+                    if result.chain_audit is not None
+                    else None
+                ),
+                "chain_root_cn": (
+                    result.chain_audit.root.subject_cn
+                    if result.chain_audit is not None and result.chain_audit.root
+                    else None
+                ),
+                "chain_verification_error": (
+                    result.chain_audit.verification_error
+                    if result.chain_audit is not None
+                    else None
+                ),
+                # --- live revocation (roadmap discussion #45, items 17-18) --
+                "revocation_checked": (
+                    result.revocation_audit.attempted
+                    if result.revocation_audit is not None
+                    else None
+                ),
+                "revoked": (
+                    result.revocation_audit.revoked
+                    if result.revocation_audit is not None
+                    else None
+                ),
+                "ocsp_status": (
+                    result.revocation_audit.ocsp_status.value
+                    if result.revocation_audit is not None
+                    else None
+                ),
+                "crl_status": (
+                    result.revocation_audit.crl_status.value
+                    if result.revocation_audit is not None
+                    else None
+                ),
+                # --- protocol & cipher enumeration (0.6.1 items 1-3) ---------
+                "max_supported_tls_version": (
+                    _highest_supported_version(result.enumeration)
+                    if result.enumeration is not None
+                    else None
+                ),
+                "weakest_supported_cipher_strength": (
+                    result.enumeration.weakest_supported_cipher_strength.value
+                    if result.enumeration is not None
+                    and result.enumeration.weakest_supported_cipher_strength is not None
+                    else None
+                ),
+                "server_enforces_cipher_order": (
+                    result.cipher_preference.server_enforces_order
+                    if result.cipher_preference is not None
+                    else None
+                ),
+                # --- IPv4/IPv6 certificate consistency (0.6.1 item 17) --------
+                "dual_stack_consistent": (
+                    result.dual_stack_audit.consistent
+                    if result.dual_stack_audit is not None
+                    else None
+                ),
+                # --- CT log trust status (0.6.1 items 10, 12) -----------------
+                "ct_all_scts_trusted": (
+                    result.ct_audit.all_trusted if result.ct_audit is not None else None
+                ),
+                # --- CA/B Baseline Requirements linting (0.6.1 item 37) --------
+                "lint_availability": (
+                    result.lint_audit.availability.value
+                    if result.lint_audit is not None
+                    else None
+                ),
+                "lint_finding_count": (
+                    len(result.lint_audit.findings)
+                    if result.lint_audit is not None
+                    else None
+                ),
+                "lint_has_errors_or_worse": (
+                    result.lint_audit.has_errors_or_worse
+                    if result.lint_audit is not None
+                    else None
+                ),
                 "error_message": result.error_message,
             }
         )
@@ -319,6 +571,7 @@ class SSLExcelExporter:
 
         try:
             SSLExcelExporter._add_summary_sheet(workbook, analyzer)
+            SSLExcelExporter._add_grade_sheet(workbook, results)
             SSLExcelExporter._add_expiry_timeline_sheet(workbook, results)
             SSLExcelExporter._add_certificate_sheet(workbook, results)
             SSLExcelExporter._add_raw_sheet(workbook, results)
@@ -383,6 +636,41 @@ class SSLExcelExporter:
                 }
             )
         add_simple_table_sheet(workbook, "Summary", pd.DataFrame(rows))
+
+    @staticmethod
+    def _add_grade_sheet(workbook: Workbook, results: Sequence[SSLResult]) -> None:
+        """Per-host grade sheet (item 20): one row per target summarising
+        the 0.6.1 opt-in checks (chain validation, revocation, CT log
+        trust, weakest negotiable cipher, CA/B lint findings). Blank, not a
+        false "pass", for any check that never ran on that target -- see
+        `HostGrade`.
+        """
+        rows: List[Dict[str, Any]] = []
+        for grade in sorted(_compute_host_grades(results), key=lambda g: g.target):
+            rows.append(
+                {
+                    "Target": grade.target,
+                    "Overall": (
+                        "—"
+                        if grade.overall_ok is None
+                        else ("OK" if grade.overall_ok else "FAIL")
+                    ),
+                    "Validation level": grade.validation_level,
+                    "Chain verified": grade.chain_verified,
+                    "Chain error": grade.chain_error,
+                    "Revoked": grade.revoked,
+                    "CT logs trusted": grade.ct_all_trusted,
+                    "Weakest cipher": grade.weakest_cipher_strength,
+                    "Lint worst severity": grade.lint_worst_severity,
+                    "Lint findings": grade.lint_finding_count,
+                    "Policy failures": (
+                        "; ".join(grade.policy_failures)
+                        if grade.policy_failures
+                        else None
+                    ),
+                }
+            )
+        add_simple_table_sheet(workbook, "Per-Host Grade", pd.DataFrame(rows))
 
     @staticmethod
     def _add_expiry_timeline_sheet(
@@ -577,6 +865,7 @@ class SSLExportBundle:
         output_path: str,
         threshold_results: Optional[Dict[str, List[ThresholdResult]]] = None,
         provenance: Optional[Dict[str, Any]] = None,
+        virtual_hosting: Optional[Sequence[MultiCertGroup]] = None,
     ) -> None:
         payload: Dict[str, Any] = {
             "schema_version": 1,
@@ -592,6 +881,11 @@ class SSLExportBundle:
                 for t, s, e in analyzer.get_failed_targets()
             ],
         }
+        if virtual_hosting:
+            # Item 16 — separate top-level key, not folded into "results":
+            # it's a property of a *group* of results (one IP, several
+            # hostnames), not of any single one.
+            payload["virtual_hosting"] = [g.to_dict() for g in virtual_hosting]
         if threshold_results:
             # Flat list with an explicit target field per entry, not a dict
             # keyed by target — every other collection in this payload
@@ -699,6 +993,71 @@ class SSLPDFExporter:
             for t, s, e in analyzer.get_failed_targets()
         )
 
+        grades = sorted(_compute_host_grades(results), key=lambda g: g.target)
+        # Gated on whether any *new* 0.6.1 check ran, not on `overall_ok`
+        # generally — `overall_ok` also folds in ordinary policy failures
+        # (expiry, deprecated TLS, ...), which already have their own
+        # column in the Targets table above. This section exists to add
+        # what isn't already visible there, so a host whose only problem is
+        # an existing policy failure doesn't pull the whole section in.
+        attempted_grades = [
+            g
+            for g in grades
+            if g.chain_verified is not None
+            or g.revoked is not None
+            or g.ct_all_trusted is not None
+            or g.weakest_cipher_strength is not None
+            or g.lint_finding_count
+        ]
+
+        def _grade_cell(value: Optional[bool], true_word: str, false_word: str) -> str:
+            if value is None:
+                return "<td>—</td>"
+            css = "ok" if not value else "critical"
+            # revoked=True and chain_verified=False both mean "bad" — the
+            # caller passes true_word/false_word already oriented so "bad"
+            # always lands on the value that should be highlighted red.
+            return f"<td class='{css}'>{true_word if value else false_word}</td>"
+
+        grade_rows_parts: List[str] = []
+        for g in attempted_grades:
+            overall_css = (
+                "ok" if g.overall_ok else ("critical" if g.overall_ok is False else "")
+            )
+            overall_text = (
+                "—" if g.overall_ok is None else ("OK" if g.overall_ok else "FAIL")
+            )
+            grade_rows_parts.append(
+                "<tr>"
+                f"<td>{g.target}</td>"
+                f"<td class='{overall_css}'>{overall_text}</td>"
+                f"<td>{g.validation_level or '—'}</td>"
+                + _grade_cell(
+                    None if g.chain_verified is None else not g.chain_verified,
+                    "invalid",
+                    "verified",
+                )
+                + _grade_cell(g.revoked, "revoked", "not revoked")
+                + _grade_cell(
+                    None if g.ct_all_trusted is None else not g.ct_all_trusted,
+                    "untrusted log",
+                    "trusted",
+                )
+                + f"<td>{g.weakest_cipher_strength or '—'}</td>"
+                + f"<td>{g.lint_finding_count or '—'}</td>"
+                + "</tr>"
+            )
+        grade_rows = "".join(grade_rows_parts)
+
+        findings_section = (
+            f"""<h2>Findings summary</h2>
+<table><tr><th>Target</th><th>Overall</th><th>Validation</th><th>Chain</th>
+<th>Revocation</th><th>CT logs</th><th>Weakest cipher</th><th>Lint findings</th></tr>
+{grade_rows}</table>"""
+            if attempted_grades
+            else ""
+        )
+
         return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>SSL/TLS Report</title>
 <style>
@@ -724,5 +1083,6 @@ Soonest expiry: {overall['cert_expiry_days_min'] if overall['cert_expiry_days_mi
 <h2>Targets</h2>
 <table><tr><th>Target</th><th>Measured</th><th>Mean ms</th><th>P95 ms</th>
 <th>Days left</th><th>Alert</th><th>TLS 1.3</th></tr>{rows}</table>
+{findings_section}
 {'<h2>Unreachable</h2><table><tr><th>Target</th><th>Status</th><th>Error</th></tr>' + failed + '</table>' if failed else ''}
 </body></html>"""
