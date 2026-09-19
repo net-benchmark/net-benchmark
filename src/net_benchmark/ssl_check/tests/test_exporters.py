@@ -16,7 +16,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from typing import Callable, Coroutine, Dict, List
+from typing import Callable, Coroutine, Dict, List, Tuple
 
 import pytest
 from openpyxl import load_workbook
@@ -52,7 +52,7 @@ TLSServerFactory = Callable[..., Coroutine[None, None, TLSServerHandle]]
 
 @pytest.fixture
 async def small_fleet(
-    tls_server: TLSServerFactory, unused_tcp_port: int
+    tls_server: TLSServerFactory, unreachable_target: Tuple[str, int]
 ) -> List[SSLResult]:
     healthy = await tls_server(validity_days=150)
     expiring = await tls_server(validity_days=90, age_days=87, filename_hint="exp")
@@ -63,11 +63,12 @@ async def small_fleet(
         connect_timeout=3,
         handshake_timeout=6,
     )
+    unreachable_host, unreachable_port = unreachable_target
     results = await engine.check_targets(
         [
             SSLTarget("localhost", healthy.port, pinned_ip="127.0.0.1"),
             SSLTarget("localhost", expiring.port, pinned_ip="127.0.0.1"),
-            SSLTarget("127.0.0.1", unused_tcp_port),
+            SSLTarget(unreachable_host, unreachable_port),
         ]
     )
     policy = PolicyConfig(min_days_remaining=30)
@@ -703,3 +704,115 @@ class TestExcelGradeSheet:
         matching = [r for r in rows[1:] if r[target_col] == small_fleet[0].target]
         assert matching
         assert matching[0][overall_col] == "FAIL"
+
+
+class TestReportBranding:
+    """SaaS-side-only report customization — no CLI flag exposes this,
+    tested here as the importable engine capability it is. `None`
+    (every call site the CLI itself uses) must be provably identical to
+    omitting the parameter entirely, not just "close enough."
+    """
+
+    def test_pdf_unbranded_default_unchanged(
+        self, small_fleet: List[SSLResult]
+    ) -> None:
+        analyzer = SSLAnalyzer(small_fleet)
+        provenance = build_provenance()
+        html_omitted = SSLPDFExporter._generate_html(small_fleet, analyzer, provenance)
+        html_explicit_none = SSLPDFExporter._generate_html(
+            small_fleet, analyzer, provenance, branding=None
+        )
+        assert html_omitted == html_explicit_none
+        assert "<title>SSL/TLS Report</title>" in html_omitted
+        assert "data:image" not in html_omitted
+
+    def test_pdf_branded_title_and_organization(
+        self, small_fleet: List[SSLResult]
+    ) -> None:
+        from net_benchmark.ssl_check.exporters import ReportBranding
+
+        analyzer = SSLAnalyzer(small_fleet)
+        branding = ReportBranding(
+            report_title="Acme Corp TLS Report", organization_name="Acme Corporation"
+        )
+        html = SSLPDFExporter._generate_html(
+            small_fleet, analyzer, build_provenance(), branding
+        )
+        assert "<title>Acme Corp TLS Report</title>" in html
+        assert "<h1>Acme Corp TLS Report</h1>" in html
+        assert "Acme Corporation" in html
+        assert (
+            "SSL/TLS Report" not in html.split("<body>")[1]
+            if "<body>" in html
+            else True
+        )
+
+    def test_pdf_branded_logo_embedded_as_base64(
+        self, small_fleet: List[SSLResult]
+    ) -> None:
+        from net_benchmark.ssl_check.exporters import ReportBranding
+
+        analyzer = SSLAnalyzer(small_fleet)
+        branding = ReportBranding(logo_bytes=b"not-a-real-png-but-bytes-are-bytes")
+        html = SSLPDFExporter._generate_html(
+            small_fleet, analyzer, build_provenance(), branding
+        )
+        assert "data:image/png;base64," in html
+
+    def test_excel_unbranded_default_unchanged(
+        self, small_fleet: List[SSLResult], tmp_path: Path
+    ) -> None:
+        analyzer = SSLAnalyzer(small_fleet)
+        out = tmp_path / "unbranded.xlsx"
+        SSLExcelExporter.export_results(
+            small_fleet, analyzer, str(out), include_charts=False
+        )
+        wb = load_workbook(str(out))
+        assert wb["Summary"]["A1"].value != "Acme Corp TLS Report"
+        # Default title falls back to whatever openpyxl itself sets when
+        # never assigned -- confirm this code path never touched it.
+        assert wb.properties.title in (None, "")
+
+    def test_excel_branded_title_creator_and_logo(
+        self, small_fleet: List[SSLResult], tmp_path: Path
+    ) -> None:
+        import io
+
+        from PIL import Image as PILImage
+
+        from net_benchmark.ssl_check.exporters import ReportBranding
+
+        buf = io.BytesIO()
+        PILImage.new("RGB", (4, 4), (10, 10, 10)).save(buf, format="PNG")
+
+        analyzer = SSLAnalyzer(small_fleet)
+        branding = ReportBranding(
+            report_title="Acme Corp TLS Report",
+            organization_name="Acme Corporation",
+            logo_bytes=buf.getvalue(),
+        )
+        out = tmp_path / "branded.xlsx"
+        SSLExcelExporter.export_results(
+            small_fleet, analyzer, str(out), include_charts=False, branding=branding
+        )
+        wb = load_workbook(str(out))
+        assert wb.properties.title == "Acme Corp TLS Report"
+        assert wb.properties.creator == "Acme Corporation"
+        sheet = wb["Summary"]
+        assert sheet["A1"].value == "Acme Corp TLS Report"
+        assert sheet["A2"].value == "Acme Corporation"
+        assert len(sheet._images) == 1
+
+    def test_excel_branding_without_logo_skips_image(
+        self, small_fleet: List[SSLResult], tmp_path: Path
+    ) -> None:
+        from net_benchmark.ssl_check.exporters import ReportBranding
+
+        analyzer = SSLAnalyzer(small_fleet)
+        branding = ReportBranding(report_title="Title Only")
+        out = tmp_path / "title_only.xlsx"
+        SSLExcelExporter.export_results(
+            small_fleet, analyzer, str(out), include_charts=False, branding=branding
+        )
+        wb = load_workbook(str(out))
+        assert len(wb["Summary"]._images) == 0
