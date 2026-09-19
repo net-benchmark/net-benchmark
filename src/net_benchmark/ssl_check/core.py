@@ -61,6 +61,9 @@ from typing import (
 )
 from urllib.parse import urlparse
 
+import httpx
+from cryptography.x509.verification import Store
+
 # Foundation item 8 relocates LatencyHistogram to a module-neutral package.
 # Imported from its current home rather than reimplemented — a second
 # histogram would be a second set of merge semantics, and the whole point of
@@ -74,6 +77,27 @@ from net_benchmark.ssl_check.certificate import (
     match_hostname,
     parse_certificate,
 )
+from net_benchmark.ssl_check.chain import (
+    DEFAULT_AIA_TIMEOUT,
+    DEFAULT_MAX_CHAIN_DEPTH,
+    ChainAudit,
+    build_chain_audit,
+    default_trust_store,
+)
+from net_benchmark.ssl_check.ct import (
+    DEFAULT_LOG_LIST_TIMEOUT,
+    DEFAULT_LOG_LIST_URL,
+    CTAudit,
+    CTLogRegistry,
+    check_ct_logs as check_ct_logs_status,
+    fetch_log_registry,
+)
+from net_benchmark.ssl_check.enumeration import (
+    CipherPreferenceResult,
+    EnumerationResult,
+    detect_cipher_preference,
+    enumerate_protocol,
+)
 from net_benchmark.ssl_check.handshake import (
     HandshakeResult,
     HandshakeStatus,
@@ -83,6 +107,19 @@ from net_benchmark.ssl_check.handshake import (
     build_client_context,
     probe_tls,
     starttls_for_port,
+)
+from net_benchmark.ssl_check.lint import LintAudit, lint_certificate
+from net_benchmark.ssl_check.revocation import (
+    DEFAULT_CRL_TIMEOUT,
+    DEFAULT_OCSP_TIMEOUT,
+    CRLStatus,
+    OCSPStatus,
+    RevocationAudit,
+    check_revocation as check_revocation_status,
+)
+from net_benchmark.ssl_check.topology import (
+    DualStackAudit,
+    check_dual_stack_consistency,
 )
 
 # ---------------------------------------------------------------------------
@@ -419,6 +456,43 @@ class SSLResult:
     chain_unavailable_reason: Optional[str] = None
     chain_certificates: List[CertificateInfo] = field(default_factory=list)
 
+    # --- validated chain (roadmap discussion #45, SSL items 11-16) ---
+    # `chain_certificates` above is what the peer sent, unvalidated, parsed
+    # for observation only. `chain_audit` is the AIA-completed, trust-store-
+    # validated result from `chain.py` — None when chain verification was
+    # never attempted (the default; see `SSLCheckEngine(verify_chain=...)`).
+    chain_audit: Optional[ChainAudit] = None
+
+    # --- live revocation check (roadmap discussion #45, SSL items 17-18) ---
+    # None when the scan did not run with --check-revocation. When both
+    # --verify-chain and --check-revocation ran, the immediate issuer this
+    # used came from chain_audit rather than a second AIA fetch -- see
+    # SSLCheckEngine._check_revocation.
+    revocation_audit: Optional[RevocationAudit] = None
+
+    # --- protocol & cipher enumeration (0.6.1 items 1-3) -------------------
+    # None when the scan did not run with --enumerate-protocol.
+    enumeration: Optional[EnumerationResult] = None
+
+    # --- server cipher-suite preference order (0.6.1 item 21) -------------
+    # Only attempted when enumerate_protocol AND enumerate_ciphers are both
+    # True — this needs the cipher probing item 1-3's flag already gates.
+    cipher_preference: Optional[CipherPreferenceResult] = None
+
+    # --- CT log identification & trust status (0.6.1 items 10, 12) --------
+    # None when the scan did not run with --check-ct-logs.
+    ct_audit: Optional[CTAudit] = None
+
+    # --- CA/B Baseline Requirements linting via pkilint (0.6.1 item 37) ---
+    # None when the scan did not run with --lint. Requires the [lint]
+    # extra; when not installed, `lint_audit.availability` says so rather
+    # than this field silently staying None the way an un-run check would.
+    lint_audit: Optional[LintAudit] = None
+
+    # --- IPv4/IPv6 certificate consistency (0.6.1 item 17) ----------------
+    # None when the scan did not run with --check-dual-stack.
+    dual_stack_audit: Optional[DualStackAudit] = None
+
     @property
     def target(self) -> str:
         return f"{self.host}:{self.port}"
@@ -495,6 +569,33 @@ class SSLResult:
                 self.certificate.to_dict() if self.certificate is not None else None
             ),
             "chain_certificates": [c.to_dict() for c in self.chain_certificates],
+            "chain_audit": (
+                self.chain_audit.to_dict() if self.chain_audit is not None else None
+            ),
+            "revocation_audit": (
+                self.revocation_audit.to_dict()
+                if self.revocation_audit is not None
+                else None
+            ),
+            "enumeration": (
+                self.enumeration.to_dict() if self.enumeration is not None else None
+            ),
+            "cipher_preference": (
+                self.cipher_preference.to_dict()
+                if self.cipher_preference is not None
+                else None
+            ),
+            "ct_audit": (
+                self.ct_audit.to_dict() if self.ct_audit is not None else None
+            ),
+            "lint_audit": (
+                self.lint_audit.to_dict() if self.lint_audit is not None else None
+            ),
+            "dual_stack_audit": (
+                self.dual_stack_audit.to_dict()
+                if self.dual_stack_audit is not None
+                else None
+            ),
         }
 
 
@@ -589,6 +690,63 @@ class SSLCheckEngine:
         # independently, reintroducing the drift this parameter exists to
         # remove.
         as_of: Optional[datetime] = None,
+        # --- chain of trust (roadmap discussion #45, SSL items 11-16) ---
+        # Off by default: this is the one class of check in the engine that
+        # makes network calls beyond the target itself (AIA fetches to
+        # whichever CA issued the chain), so it is opt-in rather than
+        # something every existing scan silently starts doing.
+        verify_chain: bool = False,
+        chain_timeout: float = DEFAULT_AIA_TIMEOUT,
+        max_chain_depth: int = DEFAULT_MAX_CHAIN_DEPTH,
+        # Extra PEM files of trust anchors, added to certifi's bundle. See
+        # `chain.default_trust_store` on why there is no "system roots"
+        # equivalent here.
+        trust_anchor_paths: Optional[Sequence[Path]] = None,
+        # Item 15, and only ever attempted when `verify_chain` is also True.
+        # A second, independent AIA walk beyond what completing the chain
+        # already required — see `chain._check_cross_sign` — so it is a
+        # separate opt-in rather than bundled into `verify_chain`.
+        check_cross_sign: bool = False,
+        # --- live revocation checking (roadmap discussion #45, items 17-18) ---
+        # Independently opt-in from `verify_chain` -- OCSP/CRL only need the
+        # leaf's immediate issuer, not a full trust-store-validated chain, so
+        # this is useful on its own. When both run, the issuer chain_audit
+        # already fetched is reused rather than fetched a second time; see
+        # `SSLCheckEngine._check_revocation`.
+        check_revocation: bool = False,
+        ocsp_timeout: float = DEFAULT_OCSP_TIMEOUT,
+        crl_timeout: float = DEFAULT_CRL_TIMEOUT,
+        # --- protocol & cipher enumeration (0.6.1 items 1-3) ---------------
+        # Also independently opt-in, and independently expensive in its own
+        # way: not extra network calls to third parties like the two above,
+        # but 5-70 extra handshakes against the target itself per scan.
+        enumerate_protocol: bool = False,
+        # Cipher probing is most of that cost; version probing alone is 5
+        # handshakes and often enough on its own.
+        enumerate_ciphers: bool = True,
+        # --- CT log identification & trust status (0.6.1 items 10, 12) -----
+        # Independently opt-in -- this resolves SCTs certificate.py already
+        # always extracts (item 11), against a registry fetched once per
+        # engine (not per target; the registry doesn't depend on what's
+        # being scanned).
+        check_ct_logs: bool = False,
+        ct_log_list_url: str = DEFAULT_LOG_LIST_URL,
+        ct_log_list_timeout: float = DEFAULT_LOG_LIST_TIMEOUT,
+        # --- CA/B Baseline Requirements linting (0.6.1 item 37) -----------
+        # Synchronous, no network -- unlike every other opt-in above, this
+        # costs no extra round trips, only CPU. Still opt-in because it
+        # requires the [lint] extra, and a caller without it installed
+        # should get that as an explicit, once-stated fact
+        # (`lint_audit.availability`), not a field that's silently always
+        # None the way it would be for an unrelated, never-requested check.
+        lint: bool = False,
+        # --- IPv4/IPv6 certificate consistency (0.6.1 item 17) ------------
+        # Independently opt-in: two extra handshakes against explicitly
+        # resolved A/AAAA addresses, only meaningful for targets that are
+        # actually dual-stack. `--resolve`-pinned targets skip this — the
+        # whole point is comparing what DNS itself hands back for the two
+        # families, which a pin bypasses by design.
+        check_dual_stack: bool = False,
     ) -> None:
         self.max_concurrent = max_concurrent
         self.connect_timeout = connect_timeout
@@ -616,6 +774,23 @@ class SSLCheckEngine:
         self.as_of: datetime = (
             as_of if as_of is not None else datetime.now(tz=timezone.utc)
         )
+        self.verify_chain = verify_chain
+        self.chain_timeout = chain_timeout
+        self.max_chain_depth = max_chain_depth
+        self.trust_anchor_paths: Tuple[str, ...] = tuple(
+            str(p) for p in (trust_anchor_paths or ())
+        )
+        self.check_cross_sign = check_cross_sign
+        self.check_revocation = check_revocation
+        self.ocsp_timeout = ocsp_timeout
+        self.crl_timeout = crl_timeout
+        self.enumerate_protocol = enumerate_protocol
+        self.enumerate_ciphers = enumerate_ciphers
+        self.check_ct_logs = check_ct_logs
+        self.ct_log_list_url = ct_log_list_url
+        self.ct_log_list_timeout = ct_log_list_timeout
+        self.lint = lint
+        self.check_dual_stack = check_dual_stack
 
         # Lazily created inside a running loop, matching DNSQueryEngine — an
         # asyncio.Semaphore constructed at import time binds to whichever loop
@@ -623,6 +798,20 @@ class SSLCheckEngine:
         self.semaphore: Optional[asyncio.Semaphore] = None
         self._lock: Optional[asyncio.Lock] = None
         self._host_locks: Dict[str, asyncio.Lock] = {}
+        # Shared across every target in the run rather than one per target —
+        # connection reuse to repeat AIA hosts (the same CA serves the AIA
+        # endpoint for every certificate it issues) and one parse of the
+        # trust store instead of one per target. Created lazily for the same
+        # reason as the semaphore: bound to whichever loop is running when
+        # first used, not to whichever loop existed at construction time.
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._trust_store: Optional[Store] = None
+        # Fetched once, on first use, and reused for every target in the
+        # scan -- the log registry doesn't depend on what's being scanned.
+        # Not created in _ensure_async_primitives like the trust store,
+        # since fetching it needs a request (async I/O), not just parsing
+        # local files; see _check_ct_logs.
+        self._ct_registry: Optional[CTLogRegistry] = None
 
         self.progress_callback: Optional[Callable[[int, int], None]] = None
         self.check_counter = 0
@@ -645,6 +834,26 @@ class SSLCheckEngine:
             self.semaphore = asyncio.Semaphore(self.max_concurrent)
         if self._lock is None:
             self._lock = asyncio.Lock()
+        if (
+            self.verify_chain or self.check_revocation or self.check_ct_logs
+        ) and self._http_client is None:
+            self._http_client = httpx.AsyncClient()
+        if self.verify_chain and self._trust_store is None:
+            self._trust_store = default_trust_store(self.trust_anchor_paths)
+
+    async def aclose(self) -> None:
+        """Release the shared AIA HTTP client, when chain verification ran.
+
+        Not called automatically at the end of `check_targets()` — a caller
+        that re-runs `check_targets()` against the same engine instance (the
+        SaaS layer, a future monitoring loop) wants the client and the parsed
+        trust store to survive across batches. Call this once the engine
+        itself is done, the same lifecycle contract `httpx.AsyncClient` asks
+        of any owner.
+        """
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
 
     def _host_lock(self, host: str) -> asyncio.Lock:
         """Per-host lock for `per_host_serial`.
@@ -814,8 +1023,140 @@ class SSLCheckEngine:
         if self.check_resumption and result.measured:
             result.resumption_supported = await self._probe_resumption(target, context)
 
+        # --- chain of trust (roadmap discussion #45, SSL items 11-16) -----
+        if self.verify_chain and result.certificate is not None:
+            result.chain_audit = await self._verify_chain(target, result, last)
+
+        # --- live revocation check (roadmap discussion #45, items 17-18) --
+        if self.check_revocation and result.certificate is not None:
+            result.revocation_audit = await self._check_revocation(result, last)
+
+        # --- protocol & cipher enumeration (0.6.1 items 1-3) --------------
+        # Not gated on `result.certificate` — this runs its own independent
+        # handshakes at each candidate version/cipher regardless of what the
+        # primary probe above negotiated, so it stays meaningful even when
+        # the primary probe failed outright (every candidate reporting
+        # unsupported is itself the correct, honest answer then).
+        if self.enumerate_protocol:
+            result.enumeration = await self._enumerate_protocol(target)
+
+        # --- server cipher-suite preference order (0.6.1 item 21) ---------
+        # Needs the same cipher probing items 1-3 already do, so it's gated
+        # on both flags rather than being its own separate opt-in.
+        if self.enumerate_protocol and self.enumerate_ciphers:
+            base_config = self._probe_config(target)
+            result.cipher_preference = await detect_cipher_preference(
+                target.host,
+                target.port,
+                starttls=target.starttls,
+                base_config=base_config,
+            )
+
+        # --- CT log identification & trust status (0.6.1 items 10, 12) ----
+        if self.check_ct_logs and result.certificate is not None:
+            result.ct_audit = await self._check_ct_logs(result)
+
+        # --- CA/B Baseline Requirements linting (0.6.1 item 37) -----------
+        # Synchronous — no `await`, matches parse_certificate's own call
+        # a few lines up in _build_result, not the async pattern the
+        # network-backed checks above use.
+        if self.lint and last.leaf_der is not None:
+            result.lint_audit = lint_certificate(last.leaf_der)
+
+        # --- IPv4/IPv6 certificate consistency (0.6.1 item 17) ------------
+        # Not gated on target.pinned_ip — a pinned target has no families to
+        # compare (see the engine constructor's docstring for this flag);
+        # check_dual_stack_consistency does its own A/AAAA resolution
+        # regardless of what the primary probe used, so this is independent
+        # of whether the primary probe itself succeeded.
+        if self.check_dual_stack and target.pinned_ip is None:
+            result.dual_stack_audit = await check_dual_stack_consistency(
+                target.host,
+                target.port,
+                starttls=target.starttls,
+                base_config=self._probe_config(target),
+            )
+
         await self._update_progress()
         return result
+
+    async def _check_ct_logs(self, result: SSLResult) -> CTAudit:
+        assert self._http_client is not None
+        assert result.certificate is not None
+        if self._ct_registry is None:
+            registry, error = await fetch_log_registry(
+                self._http_client,
+                url=self.ct_log_list_url,
+                timeout=self.ct_log_list_timeout,
+            )
+            if registry is not None:
+                self._ct_registry = registry
+            # A fetch failure is not cached as a permanent "give up" -- the
+            # next target's check will retry, since a transient network
+            # blip on the first target shouldn't silently disable CT
+            # checking for the rest of the scan.
+        return await check_ct_logs_status(
+            result.certificate.scts,
+            client=self._http_client,
+            registry=self._ct_registry,
+            timeout=self.ct_log_list_timeout,
+        )
+
+    async def _enumerate_protocol(self, target: SSLTarget) -> EnumerationResult:
+        base_config = self._probe_config(target)
+        return await enumerate_protocol(
+            target.host,
+            target.port,
+            starttls=target.starttls,
+            base_config=base_config,
+            include_ciphers=self.enumerate_ciphers,
+        )
+
+    async def _verify_chain(
+        self,
+        target: SSLTarget,
+        result: SSLResult,
+        handshake: HandshakeResult,
+    ) -> ChainAudit:
+        assert self._http_client is not None and self._trust_store is not None
+        assert handshake.leaf_der is not None  # result.certificate implies this
+        hostname = self.server_hostname or target.host
+        return await build_chain_audit(
+            handshake.leaf_der,
+            handshake.peer_chain_der,
+            client=self._http_client,
+            hostname=hostname,
+            now=self.as_of,
+            store=self._trust_store,
+            max_depth=self.max_chain_depth,
+            fetch_timeout=self.chain_timeout,
+            check_cross_sign=self.check_cross_sign,
+        )
+
+    async def _check_revocation(
+        self,
+        result: SSLResult,
+        handshake: HandshakeResult,
+    ) -> RevocationAudit:
+        assert self._http_client is not None
+        assert result.certificate is not None
+        assert handshake.leaf_der is not None
+        # Reuse chain_audit's fetched issuer when it's already there -- the
+        # whole point of `chain.fetch_issuer_certificate` being a function
+        # revocation.py calls rather than something it duplicates is so the
+        # two checks never fetch the same certificate twice when both run.
+        issuer = None
+        if result.chain_audit is not None and result.chain_audit.links:
+            issuer = result.chain_audit.links[0].raw
+        return await check_revocation_status(
+            handshake.leaf_der,
+            result.certificate.revocation,
+            client=self._http_client,
+            issuer=issuer,
+            now=self.as_of,
+            ocsp_timeout=self.ocsp_timeout,
+            crl_timeout=self.crl_timeout,
+        )
 
     async def _probe_with_retry(
         self,
@@ -1089,6 +1430,17 @@ class PolicyConfig:
     reject_weak_signature: bool = True
     reject_deprecated_tls: bool = True
     require_revocation_source: bool = False
+    # Only meaningful when the engine ran with `verify_chain=True` — see
+    # `evaluate_policy`. Ignored (never flagged) when chain verification was
+    # never attempted, since a check that did not run has not failed.
+    require_valid_chain: bool = False
+    # Only meaningful when the engine ran with `check_revocation=True`.
+    # Default True (unlike require_valid_chain): an inconclusive check
+    # (`revocation_audit.revoked is None` -- no responder reachable, no CRL
+    # reachable) is never flagged by this, only a confirmed REVOKED is, so
+    # there is no equivalent of an "unattempted check" false positive to
+    # guard against by defaulting it off.
+    reject_revoked: bool = True
 
 
 # Ordering for --min-tls-version comparisons. UNKNOWN is absent on purpose:
@@ -1199,6 +1551,29 @@ def evaluate_policy(result: SSLResult, policy: PolicyConfig) -> SSLResult:
         # the mistake item 30 exists to prevent.
         if not (lifetime is not None and lifetime.short_lived):
             failures.append("no OCSP or CRL revocation source in certificate")
+
+    if (
+        policy.require_valid_chain
+        and result.chain_audit is not None
+        and result.chain_audit.attempted
+        and not result.chain_audit.verified
+    ):
+        failures.append(
+            result.chain_audit.verification_error
+            or "certificate chain did not validate"
+        )
+
+    if (
+        policy.reject_revoked
+        and result.revocation_audit is not None
+        and result.revocation_audit.revoked is True
+    ):
+        reasons = []
+        if result.revocation_audit.ocsp_status is OCSPStatus.REVOKED:
+            reasons.append("OCSP")
+        if result.revocation_audit.crl_status is CRLStatus.REVOKED:
+            reasons.append("CRL")
+        failures.append(f"certificate revoked (per {' and '.join(reasons)})")
 
     result.policy_failures = failures
     result.compliant = not failures

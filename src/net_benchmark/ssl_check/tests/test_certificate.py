@@ -25,6 +25,7 @@ from net_benchmark.ssl_check.certificate import (
     HostnameMatch,
     KeyType,
     LifetimeVerdict,
+    ValidationLevel,
     _match_dns_label,
     audit_wildcards,
     cab_lifetime_cap,
@@ -480,3 +481,202 @@ class TestParseCertificateRaisesOnGarbage:
         failure classes."""
         with pytest.raises(ValueError):
             parse_certificate(b"definitely not DER")
+
+
+# ---------------------------------------------------------------------------
+# Validation level (item 14) and embedded SCTs (item 11)
+# ---------------------------------------------------------------------------
+
+
+def _cert_with_policy_oids(dotted_oids: list) -> bytes:
+    """A minimal cert asserting the given policy OID strings via
+    CertificatePolicies. Local helper -- `make_cert` doesn't support
+    injecting arbitrary extensions, and this is the only test file needing
+    this particular one.
+    """
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.datetime.now(UTC)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "example.com")])
+    policies = x509.CertificatePolicies(
+        [
+            x509.PolicyInformation(x509.ObjectIdentifier(oid), None)
+            for oid in dotted_oids
+        ]
+    )
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=90))
+        .add_extension(policies, critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(Encoding.DER)
+
+
+class TestValidationLevel:
+    def test_no_policies_extension_is_unknown(self, cert_factory: CertFactory) -> None:
+        info = parse_certificate(_der(cert_factory))
+        assert info.validation_level is ValidationLevel.UNKNOWN
+        assert info.validation_level_policy_oids == []
+
+    def test_domain_validated_oid_detected(self) -> None:
+        info = parse_certificate(_cert_with_policy_oids(["2.23.140.1.2.1"]))
+        assert info.validation_level is ValidationLevel.DOMAIN_VALIDATED
+        assert info.validation_level_policy_oids == ["2.23.140.1.2.1"]
+
+    def test_organization_validated_oid_detected(self) -> None:
+        info = parse_certificate(_cert_with_policy_oids(["2.23.140.1.2.2"]))
+        assert info.validation_level is ValidationLevel.ORGANIZATION_VALIDATED
+
+    def test_extended_validation_oid_detected(self) -> None:
+        info = parse_certificate(_cert_with_policy_oids(["2.23.140.1.1"]))
+        assert info.validation_level is ValidationLevel.EXTENDED_VALIDATION
+
+    def test_ev_wins_when_asserted_alongside_generic_dv(self) -> None:
+        # A real-world pattern: a CA lists both its EV OID and the generic
+        # baseline-requirements OID in the same policies extension.
+        info = parse_certificate(
+            _cert_with_policy_oids(["2.23.140.1.2.1", "2.23.140.1.1"])
+        )
+        assert info.validation_level is ValidationLevel.EXTENDED_VALIDATION
+
+    def test_unrecognised_proprietary_oid_is_unknown_not_guessed(self) -> None:
+        # A CA-proprietary OID (made up for this test) -- not in the CA/B
+        # Forum's reserved set, so this must NOT be guessed as DV/OV/EV.
+        info = parse_certificate(_cert_with_policy_oids(["1.2.3.4.5.6.7.8.9"]))
+        assert info.validation_level is ValidationLevel.UNKNOWN
+        assert info.validation_level_policy_oids == ["1.2.3.4.5.6.7.8.9"]
+
+
+# ---------------------------------------------------------------------------
+# Embedded SCTs (item 11)
+# ---------------------------------------------------------------------------
+
+
+def _der_octet_string(content: bytes) -> bytes:
+    length = len(content)
+    if length < 128:
+        length_bytes = bytes([length])
+    else:
+        len_of_len = (length.bit_length() + 7) // 8
+        length_bytes = bytes([0x80 | len_of_len]) + length.to_bytes(len_of_len, "big")
+    return b"\x04" + length_bytes + content
+
+
+def _build_sct_bytes(
+    log_id: bytes, timestamp_ms: int, sig_hash: int, sig_alg: int, signature: bytes
+) -> bytes:
+    import struct
+
+    assert len(log_id) == 32
+    return (
+        b"\x00"  # version v1
+        + log_id
+        + struct.pack(">Q", timestamp_ms)
+        + struct.pack(">H", 0)  # no SCT extensions
+        + bytes([sig_hash, sig_alg])
+        + struct.pack(">H", len(signature))
+        + signature
+    )
+
+
+def _cert_with_scts(scts: list) -> bytes:
+    """A minimal cert carrying a hand-built (but RFC 6962 §3.3-correct) SCT
+    list extension. `cryptography` has no builder for real SCTs — they
+    require an actual CT log's signature — so this constructs the wire
+    format directly and lets `cryptography`'s own parser decode it back,
+    same technique used to prove the format correct in the first place.
+    """
+    import struct
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtensionOID
+
+    entries = b"".join(struct.pack(">H", len(sct)) + sct for sct in scts)
+    raw_value = struct.pack(">H", len(entries)) + entries
+    wrapped_value = _der_octet_string(raw_value)
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.datetime.now(UTC)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "example.com")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=90))
+        .add_extension(
+            x509.UnrecognizedExtension(
+                ExtensionOID.PRECERT_SIGNED_CERTIFICATE_TIMESTAMPS, wrapped_value
+            ),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(Encoding.DER)
+
+
+class TestEmbeddedSCTs:
+    def test_no_sct_extension_is_empty_list(self, cert_factory: CertFactory) -> None:
+        info = parse_certificate(_der(cert_factory))
+        assert info.scts == []
+
+    def test_single_sct_parsed(self) -> None:
+        log_id = b"\x11" * 32
+        sct = _build_sct_bytes(
+            log_id, 1_700_000_000_000, sig_hash=4, sig_alg=3, signature=b"\x22" * 70
+        )
+        info = parse_certificate(_cert_with_scts([sct]))
+        assert len(info.scts) == 1
+        parsed = info.scts[0]
+        assert parsed.log_id_hex == log_id.hex()
+        assert parsed.version == "v1"
+        assert parsed.entry_type == "PRE_CERTIFICATE"
+        assert parsed.signature_algorithm == "ECDSA"
+        assert parsed.timestamp == datetime.datetime(
+            2023, 11, 14, 22, 13, 20, tzinfo=UTC
+        )
+
+    def test_multiple_scts_parsed_in_order(self) -> None:
+        sct1 = _build_sct_bytes(
+            b"\x11" * 32,
+            1_700_000_000_000,
+            sig_hash=4,
+            sig_alg=3,
+            signature=b"\xaa" * 70,
+        )
+        sct2 = _build_sct_bytes(
+            b"\x33" * 32,
+            1_700_000_005_000,
+            sig_hash=4,
+            sig_alg=1,
+            signature=b"\xbb" * 256,
+        )
+        info = parse_certificate(_cert_with_scts([sct1, sct2]))
+        assert [s.log_id_hex for s in info.scts] == [
+            ("11" * 32),
+            ("33" * 32),
+        ]
+        assert info.scts[1].signature_algorithm == "RSA"
+
+    def test_to_dict_shape(self) -> None:
+        sct = _build_sct_bytes(
+            b"\x44" * 32,
+            1_700_000_000_000,
+            sig_hash=4,
+            sig_alg=3,
+            signature=b"\x55" * 70,
+        )
+        info = parse_certificate(_cert_with_scts([sct]))
+        d = info.to_dict()
+        assert len(d["scts"]) == 1
+        assert d["scts"][0]["log_id_hex"] == ("44" * 32)
+        assert isinstance(d["scts"][0]["timestamp"], str)  # isoformat, not a datetime

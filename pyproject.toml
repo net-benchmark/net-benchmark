@@ -35,6 +35,11 @@ dependencies = [
     "matplotlib>=3.8,<4.0",
     "pillow>=11.0.0,<13.0.0",
     "cryptography>=44.0,<51.0",
+    # Was already present transitively via httpx; now a direct dependency
+    # because ssl_check/chain.py imports it directly to build the trust
+    # store for chain validation (roadmap discussion #45, SSL item 13).
+    # MPL-2.0 -- not in the GPL/AGPL/LGPL-banned set.
+    "certifi>=2024.0",
 ]
 
 classifiers = [
@@ -64,6 +69,12 @@ Changelog = "https://github.com/net-benchmark/net-benchmark/blob/main/CHANGELOG.
 [project.optional-dependencies]
 pdf = ["weasyprint>=66.0,<67.0"]
 websocket = ["aiohttp>=3.8,<4.0"]
+# 0.6.1 item 37. Bare `pkilint`, never `pkilint[rest]` -- that extra pulls
+# FastAPI, Starlette and Pydantic (a second Rust extension, pydantic-core)
+# for a REST API this tool never runs. pkilint's own tree pulls one compiled
+# dependency beyond it (pyasn1-fasder, a Rust DER decoder) -- acceptable
+# inside this extra under dependency policy item 3, not in the base install.
+lint = ["pkilint>=0.13,<1.0"]
 
 dev = [
     "mypy>=1.8,<2.0",
