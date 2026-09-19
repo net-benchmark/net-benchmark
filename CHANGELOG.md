@@ -1,3 +1,21 @@
+## v0.6.1 (2026-09-19)
+
+### Feat
+
+- **ssl_check**: SaaS-only PDF/Excel report branding
+- **ssl_check**: chain of trust, revocation, enumeration, ct transparency, linting, topology checks
+- **ci**: delete per-arch source tags after manifest publish
+
+### Fix
+
+- **release**: remove stale v0.6.1 changelog section
+- **ssl_check**: fix mixed_fleet's same unreachable-target race
+- **release**: pin changelog_start_rev to bypass unreachable v0.6.0 tag
+- **ssl_check**: deterministic unreachable-target fixture
+- **test**: make small_fleet unreachable target deterministic
+- **release**: revert premature 0.6.1 version bump on main
+- **docs**: pin Docker Image Version badge to the latest tag explicitly
+
 ## v0.6.0 (2026-09-10)
 
 ### BREAKING CHANGE
