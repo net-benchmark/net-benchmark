@@ -9,7 +9,7 @@ that reason.
 
 from __future__ import annotations
 
-from typing import Callable, Coroutine, List
+from typing import Callable, Coroutine, List, Tuple
 
 import pytest
 
@@ -38,7 +38,7 @@ TLSServerFactory = Callable[..., Coroutine[None, None, TLSServerHandle]]
 
 @pytest.fixture
 async def mixed_fleet(
-    tls_server: TLSServerFactory, unused_tcp_port: int
+    tls_server: TLSServerFactory, unreachable_target: Tuple[str, int]
 ) -> List[SSLResult]:
     """One healthy target, one expiring-soon target, one unreachable target —
     exercises the full range of what get_target_statistics has to handle."""
@@ -52,10 +52,11 @@ async def mixed_fleet(
         connect_timeout=3,
         handshake_timeout=6,
     )
+    unreachable_host, unreachable_port = unreachable_target
     targets = [
         SSLTarget("localhost", healthy.port, pinned_ip="127.0.0.1"),
         SSLTarget("localhost", expiring.port, pinned_ip="127.0.0.1"),
-        SSLTarget("127.0.0.1", unused_tcp_port),
+        SSLTarget(unreachable_host, unreachable_port),
     ]
     results = await engine.check_targets(targets)
     policy = PolicyConfig(min_days_remaining=30)
