@@ -148,3 +148,4 @@ version_files = [
     "pyproject.toml:version",
     "src/net_benchmark/__init__.py:__version__"
 ]
+changelog_start_rev = "3ff93a8"
