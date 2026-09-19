@@ -21,7 +21,16 @@ import asyncio
 import datetime
 import ssl
 from pathlib import Path
-from typing import AsyncIterator, Callable, Coroutine, List, Optional, Tuple, Union
+from typing import (
+    AsyncIterator,
+    Callable,
+    Coroutine,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import pytest
 import pytest_asyncio
@@ -533,3 +542,50 @@ def unused_tcp_port() -> int:
     # The socket is closed on exit from the `with` block, so the port is free
     # again but was never accepting connections — refused, not filtered.
     return int(port)
+
+
+@pytest.fixture
+def unreachable_target() -> Iterator[Tuple[str, int]]:
+    """A (host, port) pair that is deterministically unreachable, with no
+    race condition -- unlike `unused_tcp_port` above, which finds a port
+    that happens to be free right now and trusts it stays free until the
+    caller actually connects. Under concurrent test-suite load, something
+    else can grab it in that gap, so a fixture built on `unused_tcp_port`
+    for "this must be unreachable" is occasionally, genuinely flaky —
+    confirmed directly: this exact race tripped two independent tests this
+    session, including in a real CI run, not just a hypothesis.
+
+    Binds a real socket and deliberately never calls `listen()` on it,
+    holding it open for the fixture's whole lifetime. Confirmed directly
+    (not assumed): on Linux, a bound-but-not-listening socket makes the
+    kernel reply to an incoming SYN with an instant RST — a genuine
+    ECONNREFUSED, 0ms, not a timeout — because the kernel only routes
+    connections to sockets in LISTEN state. Holding the socket open for
+    the fixture's full lifetime (yield, not return-then-close) is what
+    actually closes the race: the port can never be reclaimed by anything
+    else during the window a caller is connecting to it, because this
+    fixture is still holding it.
+
+    Deliberately not built on TEST-NET-1 (RFC 5737) despite that also
+    being race-free: it fails by timeout, not refusal, so it's slower
+    (pays a full connect_timeout instead of ~0ms) and, more importantly,
+    changes *what's being tested* — this project's own HandshakeStatus
+    distinguishes TCP_REFUSED from TCP_TIMEOUT as separate, meaningful
+    outcomes, and `unused_tcp_port`'s own docstring already specifies
+    "refused, not filtered" as the intent. This fixture preserves that
+    exact semantic instead of quietly swapping it for a different one.
+
+    Only used where a test specifically needs a target that is guaranteed
+    unreachable; `unused_tcp_port` is untouched for its other callers to
+    avoid changing a fixture six files rely on under release time
+    pressure.
+    """
+    import socket
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.bind(("127.0.0.1", 0))
+    port = holder.getsockname()[1]
+    try:
+        yield "127.0.0.1", port
+    finally:
+        holder.close()
