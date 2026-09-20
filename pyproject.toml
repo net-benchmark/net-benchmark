@@ -75,6 +75,14 @@ websocket = ["aiohttp>=3.8,<4.0"]
 # dependency beyond it (pyasn1-fasder, a Rust DER decoder) -- acceptable
 # inside this extra under dependency policy item 3, not in the base install.
 lint = ["pkilint>=0.13,<1.0"]
+# 0.6.2 items 1-9 ("Handshake internals"). Dependency audit done before
+# adding this (see deep_introspection.py's own docstring for the full
+# trace): every transitive dependency is permissively licensed, and the
+# one real risk the roadmap named (oscrypto breaking on modern OpenSSL
+# 3.0.x version strings) is confirmed but isolated to the certificate/
+# pubkey submodules this project never imports -- certificate.py/chain.py
+# are already its own single certificate parser.
+crypto = ["CryptoLyzer>=1.6,<2.0", "pyjarm>=0.0.5,<1.0", "mscerts>=2023.11,<2027.0"]
 
 dev = [
     "mypy>=1.8,<2.0",

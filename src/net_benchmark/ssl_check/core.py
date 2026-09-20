@@ -45,6 +45,7 @@ import ssl
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,12 +93,20 @@ from net_benchmark.ssl_check.ct import (
     check_ct_logs as check_ct_logs_status,
     fetch_log_registry,
 )
+from net_benchmark.ssl_check.deep_introspection import (
+    ClientSimulationResult,
+    DeepIntrospectionResult,
+    default_crypto_executor,
+    probe_client_simulation,
+    probe_deep_introspection,
+)
 from net_benchmark.ssl_check.enumeration import (
     CipherPreferenceResult,
     EnumerationResult,
     detect_cipher_preference,
     enumerate_protocol,
 )
+from net_benchmark.ssl_check.grading import GradeResult, grade_certificate
 from net_benchmark.ssl_check.handshake import (
     HandshakeResult,
     HandshakeStatus,
@@ -108,7 +117,17 @@ from net_benchmark.ssl_check.handshake import (
     probe_tls,
     starttls_for_port,
 )
+from net_benchmark.ssl_check.jarm import JarmResult, probe_jarm
 from net_benchmark.ssl_check.lint import LintAudit, lint_certificate
+from net_benchmark.ssl_check.mozilla_profile import (
+    MozillaProfileAudit,
+    check_mozilla_profiles as run_mozilla_profile_checks,
+)
+from net_benchmark.ssl_check.multi_store import (
+    MultiStoreAudit,
+    check_multi_store_trust as run_multi_store_trust_check,
+)
+from net_benchmark.ssl_check.pinning import PinSetResult, generate_pin_set
 from net_benchmark.ssl_check.revocation import (
     DEFAULT_CRL_TIMEOUT,
     DEFAULT_OCSP_TIMEOUT,
@@ -117,9 +136,14 @@ from net_benchmark.ssl_check.revocation import (
     RevocationAudit,
     check_revocation as check_revocation_status,
 )
+from net_benchmark.ssl_check.san_audit import SanAuditResult, audit_san_entries
 from net_benchmark.ssl_check.topology import (
     DualStackAudit,
     check_dual_stack_consistency,
+)
+from net_benchmark.ssl_check.zero_rtt import (
+    ZeroRttTimingResult,
+    measure_zero_rtt_timing,
 )
 
 # ---------------------------------------------------------------------------
@@ -493,6 +517,61 @@ class SSLResult:
     # None when the scan did not run with --check-dual-stack.
     dual_stack_audit: Optional[DualStackAudit] = None
 
+    # --- TLS deep introspection via CryptoLyzer (0.6.2 items 1-9) --------
+    # None when the scan did not run with --deep-introspection. Requires
+    # the [crypto] extra; when not installed,
+    # deep_introspection.availability says so rather than this field
+    # silently staying None the way an un-run check would.
+    deep_introspection: Optional[DeepIntrospectionResult] = None
+
+    # --- Client simulation (0.6.2 item 23) --------------------------------
+    # None when the scan did not run with --simulate-clients. Separate
+    # opt-in from --deep-introspection: this makes roughly 70 real
+    # handshake attempts per target (confirmed empirically) — bundling it
+    # into the deep-introspection default would make the common case far
+    # slower for a check most callers will not want every time.
+    client_simulation: Optional[ClientSimulationResult] = None
+
+    # --- JARM server fingerprinting (0.6.2 item 24) -----------------------
+    # None when the scan did not run with --jarm. JA4S is not implemented —
+    # see jarm.py's own module docstring for the two independent reasons
+    # (packet-capture-based tooling only, and a non-standard licence on
+    # the one implementation found).
+    jarm: Optional[JarmResult] = None
+
+    # --- Full multi-store trust validation (0.6.2 item 22) ----------------
+    # None when the scan did not run with --check-multi-store. Only
+    # meaningful alongside --verify-chain (needs a built chain to test
+    # against each additional store) — see multi_store.py's own docstring.
+    multi_store_audit: Optional[MultiStoreAudit] = None
+
+    # --- Multi-SAN audit against active subdomains (0.6.2 item 27) --------
+    # None when the scan did not run with --audit-san.
+    san_audit: Optional[SanAuditResult] = None
+
+    # --- TLS 1.3 0-RTT timing (0.6.2 item 11) -------------------------------
+    # None when the scan did not run with --measure-0rtt. Requires the
+    # system openssl CLI — see zero_rtt.py's own docstring on why no
+    # Python library covers this.
+    zero_rtt_timing: Optional[ZeroRttTimingResult] = None
+
+    # --- SSL Labs-style grade (0.6.2 items 20-21) -------------------------
+    # None when the scan did not run with --grade. Synchronous, computed
+    # from whatever the other checks above already populated — see
+    # grading.py's own docstring on why the grade is best-effort and names
+    # its own data gaps when e.g. --enumerate-protocol wasn't also passed,
+    # rather than silently scoring against incomplete data.
+    grade: Optional[GradeResult] = None
+
+    # --- Server Side TLS (formerly Mozilla, now TLSRef) profile compliance -
+    # (0.6.2 item 21). None when the scan did not run with
+    # --check-mozilla-profiles.
+    mozilla_profile_audit: Optional[MozillaProfileAudit] = None
+
+    # --- SPKI pin set generation (0.6.2 item 25) ---------------------------
+    # None when the scan did not run with --generate-pin-set.
+    pin_set: Optional[PinSetResult] = None
+
     @property
     def target(self) -> str:
         return f"{self.host}:{self.port}"
@@ -596,6 +675,37 @@ class SSLResult:
                 if self.dual_stack_audit is not None
                 else None
             ),
+            "deep_introspection": (
+                self.deep_introspection.to_dict()
+                if self.deep_introspection is not None
+                else None
+            ),
+            "client_simulation": (
+                self.client_simulation.to_dict()
+                if self.client_simulation is not None
+                else None
+            ),
+            "jarm": self.jarm.to_dict() if self.jarm is not None else None,
+            "multi_store_audit": (
+                self.multi_store_audit.to_dict()
+                if self.multi_store_audit is not None
+                else None
+            ),
+            "san_audit": (
+                self.san_audit.to_dict() if self.san_audit is not None else None
+            ),
+            "zero_rtt_timing": (
+                self.zero_rtt_timing.to_dict()
+                if self.zero_rtt_timing is not None
+                else None
+            ),
+            "grade": self.grade.to_dict() if self.grade is not None else None,
+            "mozilla_profile_audit": (
+                self.mozilla_profile_audit.to_dict()
+                if self.mozilla_profile_audit is not None
+                else None
+            ),
+            "pin_set": self.pin_set.to_dict() if self.pin_set is not None else None,
         }
 
 
@@ -747,6 +857,48 @@ class SSLCheckEngine:
         # whole point is comparing what DNS itself hands back for the two
         # families, which a pin bypasses by design.
         check_dual_stack: bool = False,
+        # --- TLS deep introspection via CryptoLyzer (0.6.2 items 1-9) -----
+        # Independently opt-in, and a different kind of cost than every
+        # other flag above: not extra network round trips alone, but a
+        # synchronous third-party library bridged onto this async engine
+        # via a dedicated thread pool (see deep_introspection.py's module
+        # docstring on why, and its own dependency-audit trace).
+        deep_introspection: bool = False,
+        crypto_executor_workers: int = 10,
+        # --- SSL Labs-style grade (0.6.2 items 20-21) ---------------------
+        # Synchronous, no new network cost of its own — scores whatever the
+        # other checks above already collected. Still its own opt-in flag,
+        # since without --enumerate-protocol/--deep-introspection also
+        # having run there is little to grade; see grading.py.
+        grade: bool = False,
+        # --- Server Side TLS profile compliance (0.6.2 item 21) -----------
+        # `mozilla_profiles=None` (the default) checks every profile the
+        # fetched guidelines document actually contains — see
+        # mozilla_profile.py on why that currently means Modern and
+        # Intermediate, not a hardcoded third "Old" that no longer exists
+        # upstream.
+        check_mozilla_profiles: bool = False,
+        mozilla_profiles: Optional[List[str]] = None,
+        # --- SPKI pin set generation (0.6.2 item 25) -----------------------
+        generate_pin_set_output: bool = False,
+        pin_set_include_root: bool = True,
+        # --- Client simulation (0.6.2 item 23) -----------------------------
+        # Reuses the same crypto executor as --deep-introspection; requires
+        # the [crypto] extra for the same reason.
+        simulate_clients: bool = False,
+        # --- JARM server fingerprinting (0.6.2 item 24) --------------------
+        jarm: bool = False,
+        jarm_timeout: float = 20.0,
+        # --- Full multi-store trust validation (0.6.2 item 22) ------------
+        check_multi_store: bool = False,
+        # --- Multi-SAN audit against active subdomains (0.6.2 item 27) ----
+        audit_san: bool = False,
+        san_audit_max_entries: int = 25,
+        san_audit_concurrency: int = 10,
+        san_audit_timeout: float = 5.0,
+        # --- TLS 1.3 0-RTT timing (0.6.2 item 11) --------------------------
+        measure_zero_rtt: bool = False,
+        zero_rtt_timeout: float = 10.0,
     ) -> None:
         self.max_concurrent = max_concurrent
         self.connect_timeout = connect_timeout
@@ -791,6 +943,23 @@ class SSLCheckEngine:
         self.ct_log_list_timeout = ct_log_list_timeout
         self.lint = lint
         self.check_dual_stack = check_dual_stack
+        self.deep_introspection = deep_introspection
+        self.crypto_executor_workers = crypto_executor_workers
+        self.grade = grade
+        self.check_mozilla_profiles = check_mozilla_profiles
+        self.mozilla_profiles = mozilla_profiles
+        self.generate_pin_set_output = generate_pin_set_output
+        self.pin_set_include_root = pin_set_include_root
+        self.simulate_clients = simulate_clients
+        self.jarm = jarm
+        self.jarm_timeout = jarm_timeout
+        self.check_multi_store = check_multi_store
+        self.audit_san = audit_san
+        self.san_audit_max_entries = san_audit_max_entries
+        self.san_audit_concurrency = san_audit_concurrency
+        self.san_audit_timeout = san_audit_timeout
+        self.measure_zero_rtt = measure_zero_rtt
+        self.zero_rtt_timeout = zero_rtt_timeout
 
         # Lazily created inside a running loop, matching DNSQueryEngine — an
         # asyncio.Semaphore constructed at import time binds to whichever loop
@@ -812,6 +981,21 @@ class SSLCheckEngine:
         # since fetching it needs a request (async I/O), not just parsing
         # local files; see _check_ct_logs.
         self._ct_registry: Optional[CTLogRegistry] = None
+        # Same one-fetch-per-engine-run reasoning as _ct_registry: the
+        # guidelines document is identical across every target in a scan.
+        # _mozilla_guidelines_fetched distinguishes "haven't tried yet"
+        # from "tried and it failed" — both leave _mozilla_guidelines at
+        # None, but only the first should trigger a retry on the next
+        # target; a failing fetch should not be retried for every target
+        # in the scan.
+        self._mozilla_guidelines: Optional[Dict[str, Any]] = None
+        self._mozilla_guidelines_fetched: bool = False
+        self._mozilla_guidelines_error: Optional[str] = None
+        # Lazily created, same reasoning as _http_client: a ThreadPoolExecutor
+        # created at construction time isn't bound to a specific event loop
+        # the way asyncio primitives are, but creating it unconditionally
+        # would spin up worker threads for a check that may never run.
+        self._crypto_executor: Optional[ThreadPoolExecutor] = None
 
         self.progress_callback: Optional[Callable[[int, int], None]] = None
         self.check_counter = 0
@@ -835,25 +1019,39 @@ class SSLCheckEngine:
         if self._lock is None:
             self._lock = asyncio.Lock()
         if (
-            self.verify_chain or self.check_revocation or self.check_ct_logs
+            self.verify_chain
+            or self.check_revocation
+            or self.check_ct_logs
+            or self.check_mozilla_profiles
+            or self.check_multi_store
         ) and self._http_client is None:
             self._http_client = httpx.AsyncClient()
         if self.verify_chain and self._trust_store is None:
             self._trust_store = default_trust_store(self.trust_anchor_paths)
+        if (
+            self.deep_introspection or self.simulate_clients
+        ) and self._crypto_executor is None:
+            self._crypto_executor = default_crypto_executor(
+                self.crypto_executor_workers
+            )
 
     async def aclose(self) -> None:
-        """Release the shared AIA HTTP client, when chain verification ran.
+        """Release the shared AIA HTTP client and crypto thread pool, when
+        either ran.
 
         Not called automatically at the end of `check_targets()` — a caller
         that re-runs `check_targets()` against the same engine instance (the
-        SaaS layer, a future monitoring loop) wants the client and the parsed
-        trust store to survive across batches. Call this once the engine
-        itself is done, the same lifecycle contract `httpx.AsyncClient` asks
-        of any owner.
+        SaaS layer, a future monitoring loop) wants the client, the parsed
+        trust store, and the thread pool to survive across batches. Call
+        this once the engine itself is done, the same lifecycle contract
+        `httpx.AsyncClient` and `ThreadPoolExecutor` each ask of any owner.
         """
         if self._http_client is not None:
             await self._http_client.aclose()
             self._http_client = None
+        if self._crypto_executor is not None:
+            self._crypto_executor.shutdown(wait=False)
+            self._crypto_executor = None
 
     def _host_lock(self, host: str) -> asyncio.Lock:
         """Per-host lock for `per_host_serial`.
@@ -1027,6 +1225,24 @@ class SSLCheckEngine:
         if self.verify_chain and result.certificate is not None:
             result.chain_audit = await self._verify_chain(target, result, last)
 
+            # --- Full multi-store trust validation (0.6.2 item 22) --------
+            # Reuses the same leaf/peer-chain data _verify_chain just used
+            # — see multi_store.py's own docstring on why this doesn't
+            # repeat AIA fetching per vendor store. Only meaningful
+            # alongside verify_chain, since there's otherwise no leaf DER
+            # to hand it (matching --verify-chain's own certificate-gate
+            # above).
+            if self.check_multi_store and last.leaf_der is not None:
+                assert self._http_client is not None
+                hostname = self.server_hostname or target.host
+                result.multi_store_audit = await run_multi_store_trust_check(
+                    last.leaf_der,
+                    last.peer_chain_der,
+                    client=self._http_client,
+                    hostname=hostname,
+                    now=self.as_of,
+                )
+
         # --- live revocation check (roadmap discussion #45, items 17-18) --
         if self.check_revocation and result.certificate is not None:
             result.revocation_audit = await self._check_revocation(result, last)
@@ -1063,6 +1279,28 @@ class SSLCheckEngine:
         if self.lint and last.leaf_der is not None:
             result.lint_audit = lint_certificate(last.leaf_der)
 
+        # --- Multi-SAN audit against active subdomains (0.6.2 item 27) ----
+        if self.audit_san and result.certificate is not None:
+            result.san_audit = await audit_san_entries(
+                result.certificate,
+                port=target.port,
+                starttls=target.starttls,
+                max_entries=self.san_audit_max_entries,
+                concurrency=self.san_audit_concurrency,
+                timeout=self.san_audit_timeout,
+            )
+
+        # --- TLS 1.3 0-RTT timing (0.6.2 item 11) --------------------------
+        # openssl s_client's own -connect handles implicit TLS only; no
+        # STARTTLS negotiation flag is threaded through here, matching the
+        # same implicit-TLS-only scope the other openssl/CryptoLyzer-backed
+        # checks above already have.
+        if self.measure_zero_rtt and target.starttls is StartTLSProtocol.NONE:
+            hostname = self.server_hostname or target.host
+            result.zero_rtt_timing = await measure_zero_rtt_timing(
+                hostname, target.port, timeout=self.zero_rtt_timeout
+            )
+
         # --- IPv4/IPv6 certificate consistency (0.6.1 item 17) ------------
         # Not gated on target.pinned_ip — a pinned target has no families to
         # compare (see the engine constructor's docstring for this flag);
@@ -1076,6 +1314,80 @@ class SSLCheckEngine:
                 starttls=target.starttls,
                 base_config=self._probe_config(target),
             )
+
+        # --- TLS deep introspection via CryptoLyzer (0.6.2 items 1-9) -----
+        # Not gated on result.certificate — these probes run their own
+        # independent connections via CryptoLyzer's own protocol stack,
+        # same reasoning as enumerate_protocol above. Skipped for STARTTLS
+        # targets: only L7ClientTls (implicit TLS) is wired in this pass
+        # (see deep_introspection.py's own scope note) — attempting a raw
+        # TLS handshake against a port expecting a STARTTLS negotiation
+        # first would just fail with a confusing low-level error, not a
+        # clear "not supported for this target" one.
+        if self.deep_introspection and target.starttls is StartTLSProtocol.NONE:
+            assert self._crypto_executor is not None
+            result.deep_introspection = await probe_deep_introspection(
+                target.host, target.port, executor=self._crypto_executor
+            )
+
+        # --- Client simulation (0.6.2 item 23) -----------------------------
+        # Same STARTTLS scope note as deep_introspection above — CryptoLyzer's
+        # L7ClientHTTPS (required specifically for this probe; see
+        # deep_introspection.py's own note on why) is implicit-TLS only too.
+        if self.simulate_clients and target.starttls is StartTLSProtocol.NONE:
+            assert self._crypto_executor is not None
+            result.client_simulation = await probe_client_simulation(
+                target.host, target.port, executor=self._crypto_executor
+            )
+
+        # --- JARM server fingerprinting (0.6.2 item 24) --------------------
+        # pyjarm has no STARTTLS support either, so the same scope note as
+        # the two checks above applies here too. Natively async — no
+        # crypto executor needed, unlike the CryptoLyzer-backed checks.
+        if self.jarm and target.starttls is StartTLSProtocol.NONE:
+            result.jarm = await probe_jarm(
+                target.host, target.port, timeout=self.jarm_timeout
+            )
+
+        # --- SSL Labs-style grade (0.6.2 items 20-21) ---------------------
+        # Last, deliberately: scores whatever chain_audit/revocation_audit/
+        # enumeration/deep_introspection above already populated on this
+        # same result. Synchronous — no await needed, same as lint above.
+        if self.grade:
+            result.grade = grade_certificate(result)
+
+        # --- SPKI pin set generation (0.6.2 item 25) -----------------------
+        # Synchronous, no await — same as grading and lint above.
+        if self.generate_pin_set_output:
+            result.pin_set = generate_pin_set(
+                result, include_root=self.pin_set_include_root
+            )
+
+        # --- Server Side TLS profile compliance (0.6.2 item 21) -----------
+        # Also scores whatever's already on `result`, same as grading above
+        # — but needs the guidelines document, fetched once per engine run
+        # (not per target) and cached on self._mozilla_guidelines, same
+        # reasoning as self._ct_registry above.
+        if self.check_mozilla_profiles:
+            assert self._http_client is not None
+            if not self._mozilla_guidelines_fetched:
+                from net_benchmark.ssl_check.mozilla_profile import fetch_guidelines
+
+                guidelines, guidelines_error = await fetch_guidelines(self._http_client)
+                self._mozilla_guidelines = guidelines
+                self._mozilla_guidelines_error = guidelines_error
+                self._mozilla_guidelines_fetched = True
+            result.mozilla_profile_audit = await run_mozilla_profile_checks(
+                result,
+                client=self._http_client,
+                profiles=self.mozilla_profiles,
+                guidelines=self._mozilla_guidelines,
+            )
+            if (
+                self._mozilla_guidelines is None
+                and self._mozilla_guidelines_error is not None
+            ):
+                result.mozilla_profile_audit.error = self._mozilla_guidelines_error
 
         await self._update_progress()
         return result
@@ -1424,6 +1736,18 @@ class PolicyConfig:
     min_tls_version: Optional[TLSVersion] = None
     expected_issuer: Optional[str] = None
     expected_fingerprint: Optional[str] = None
+    # 0.6.2 item 26. expected_cipher checks the primary handshake's own
+    # negotiated cipher directly (SSLResult.cipher_name, item 33) — a
+    # precise, single-handshake fact. expected_group has no stdlib
+    # equivalent to check precisely against pre-Python 3.13 (SSLSocket has
+    # no public API for the negotiated group before then), so it checks
+    # negotiability instead: whether the expected group is among what
+    # --deep-introspection's named_groups probe found the target willing
+    # to negotiate at all, not necessarily what the primary handshake
+    # itself picked. Both are None (not checked) unless the relevant data
+    # is present — never a false failure for a check that did not run.
+    expected_cipher: Optional[str] = None
+    expected_group: Optional[str] = None
     require_hostname_match: bool = True
     require_forward_secrecy: bool = False
     reject_weak_key: bool = True
@@ -1543,6 +1867,35 @@ def evaluate_policy(result: SSLResult, policy: PolicyConfig) -> SSLResult:
         }
         if expected not in {v.lower() for v in actual_values}:
             failures.append("certificate fingerprint does not match expected value")
+
+    if policy.expected_cipher is not None:
+        if result.cipher_name is None:
+            failures.append(
+                f"expected cipher {policy.expected_cipher!r} but no cipher was negotiated"
+            )
+        elif result.cipher_name.upper() != policy.expected_cipher.upper():
+            failures.append(
+                f"negotiated cipher {result.cipher_name!r} does not match "
+                f"expected {policy.expected_cipher!r}"
+            )
+
+    if policy.expected_group is not None:
+        if (
+            result.deep_introspection is None
+            or result.deep_introspection.named_groups is None
+            or not result.deep_introspection.named_groups.attempted
+        ):
+            failures.append(
+                f"expected group {policy.expected_group!r} but group negotiability "
+                "was not checked (requires --deep-introspection)"
+            )
+        elif policy.expected_group.upper() not in {
+            g.upper() for g in result.deep_introspection.named_groups.groups
+        }:
+            failures.append(
+                f"expected group {policy.expected_group!r} is not among the "
+                "target's negotiable named groups"
+            )
 
     if policy.require_revocation_source and not certificate.revocation.has_any_source:
         # Short-lived certificates are exempt under the CA/B Baseline

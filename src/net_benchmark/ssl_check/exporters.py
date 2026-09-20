@@ -178,6 +178,14 @@ def _highest_supported_version(enumeration: EnumerationResult) -> Optional[str]:
 # its results reports that, not a WARNING from a different result.
 _LINT_SEVERITY_PRIORITY = ["fatal", "error", "warning", "notice", "info", "debug"]
 _CIPHER_STRENGTH_PRIORITY = ["F", "C", "B", "A"]
+# Best to worst, matching grading.Grade's own ordering (that list is
+# private to grading.py; duplicated here rather than imported, since this
+# is purely a display-priority concern for the summary sheet, not a
+# grading decision). M and T are placed after F: neither is "worse than F"
+# in the guide's own sense (they mean the A-F scale doesn't apply at all),
+# but for a single worst-case summary column, treating a trust/name
+# problem as the most severe finding is the more useful simplification.
+_SSL_LABS_GRADE_PRIORITY = ["F", "E", "D", "C", "B", "A-", "A", "A+", "T", "M"]
 
 
 @dataclass
@@ -196,6 +204,12 @@ class HostGrade:
     weakest_cipher_strength: Optional[str] = None
     lint_worst_severity: Optional[str] = None
     lint_finding_count: int = 0
+    # 0.6.2 items 20-21 — worst (lowest) SSL Labs-style grade seen across
+    # this target's results, string-compared via the same letter ordering
+    # grading.py itself uses (see grading._GRADE_ORDER); not folded into
+    # `overall_ok` below, since a B or C grade is informative, not a
+    # pass/fail verdict the way the other fields here are.
+    ssl_labs_grade: Optional[str] = None
     policy_failures: List[str] = field(default_factory=list)
 
     @property
@@ -258,6 +272,14 @@ def _compute_host_grades(results: Sequence[SSLResult]) -> List[HostGrade]:
                     grade.weakest_cipher_strength = min(
                         candidates, key=_CIPHER_STRENGTH_PRIORITY.index
                     )
+
+        if result.grade is not None and result.grade.grade is not None:
+            new_value = result.grade.grade.value
+            candidates = [g for g in (grade.ssl_labs_grade, new_value) if g]
+            if candidates:
+                grade.ssl_labs_grade = min(
+                    candidates, key=_SSL_LABS_GRADE_PRIORITY.index
+                )
 
         if result.lint_audit is not None and result.lint_audit.attempted:
             grade.lint_finding_count += len(result.lint_audit.findings)
@@ -495,6 +517,110 @@ def _raw_rows(results: Sequence[SSLResult]) -> List[Dict[str, Any]]:
                     if result.dual_stack_audit is not None
                     else None
                 ),
+                # --- TLS deep introspection via CryptoLyzer (0.6.2 items 1-9) --
+                "deep_introspection_availability": (
+                    result.deep_introspection.availability.value
+                    if result.deep_introspection is not None
+                    else None
+                ),
+                "negotiable_tls13_cipher_count": (
+                    len(result.deep_introspection.tls13_ciphers.suites)
+                    if result.deep_introspection is not None
+                    and result.deep_introspection.tls13_ciphers is not None
+                    else None
+                ),
+                "dhe_key_reuse": (
+                    result.deep_introspection.dh_params.key_reuse
+                    if result.deep_introspection is not None
+                    and result.deep_introspection.dh_params is not None
+                    else None
+                ),
+                "post_quantum_group_negotiable": (
+                    bool(result.deep_introspection.named_groups.post_quantum_groups)
+                    if result.deep_introspection is not None
+                    and result.deep_introspection.named_groups is not None
+                    else None
+                ),
+                "vulnerability_flags_set": (
+                    ",".join(
+                        name
+                        for name in (
+                            "sweet32",
+                            "anonymous_dh",
+                            "rc4",
+                            "non_forward_secret",
+                            "null_encryption",
+                            "lucky13",
+                            "freak",
+                            "logjam",
+                            "export_grade",
+                            "weak_dh",
+                            "dheat",
+                            "drown",
+                            "insecure_ssl_version",
+                            "inappropriate_version_fallback",
+                            "poodle",
+                            "beast",
+                        )
+                        if getattr(
+                            result.deep_introspection.vulnerabilities, name, None
+                        )
+                        is True
+                    )
+                    if result.deep_introspection is not None
+                    and result.deep_introspection.vulnerabilities is not None
+                    else None
+                ),
+                # --- SSL Labs-style grade (0.6.2 items 20-21) ------------------
+                "ssl_labs_grade": (
+                    result.grade.grade.value
+                    if result.grade is not None and result.grade.grade is not None
+                    else None
+                ),
+                "ssl_labs_numerical_score": (
+                    result.grade.numerical_score if result.grade is not None else None
+                ),
+                # --- Server Side TLS profile compliance (0.6.2 item 21) --------
+                "mozilla_profile_compliance": (
+                    ",".join(
+                        f"{name}={r.compliant}"
+                        for name, r in result.mozilla_profile_audit.results.items()
+                    )
+                    if result.mozilla_profile_audit is not None
+                    else None
+                ),
+                # --- JARM server fingerprinting (0.6.2 item 24) -----------------
+                "jarm_fingerprint": (
+                    result.jarm.fingerprint if result.jarm is not None else None
+                ),
+                # --- Full multi-store trust validation (0.6.2 item 22) ----------
+                "multi_store_consistent": (
+                    result.multi_store_audit.consistent
+                    if result.multi_store_audit is not None
+                    else None
+                ),
+                # --- Multi-SAN audit against active subdomains (0.6.2 item 27) --
+                "san_inactive_count": (
+                    len(result.san_audit.inactive_sans)
+                    if result.san_audit is not None
+                    else None
+                ),
+                "san_inconsistent_count": (
+                    len(result.san_audit.inconsistent_sans)
+                    if result.san_audit is not None
+                    else None
+                ),
+                # --- TLS 1.3 0-RTT timing (0.6.2 item 11) ------------------------
+                "zero_rtt_status": (
+                    result.zero_rtt_timing.early_data_status
+                    if result.zero_rtt_timing is not None
+                    else None
+                ),
+                "zero_rtt_savings_ms": (
+                    result.zero_rtt_timing.early_data_savings_ms
+                    if result.zero_rtt_timing is not None
+                    else None
+                ),
                 # --- CT log trust status (0.6.1 items 10, 12) -----------------
                 "ct_all_scts_trusted": (
                     result.ct_audit.all_trusted if result.ct_audit is not None else None
@@ -720,6 +846,7 @@ class SSLExcelExporter:
                     "Weakest cipher": grade.weakest_cipher_strength,
                     "Lint worst severity": grade.lint_worst_severity,
                     "Lint findings": grade.lint_finding_count,
+                    "SSL Labs grade": grade.ssl_labs_grade,
                     "Policy failures": (
                         "; ".join(grade.policy_failures)
                         if grade.policy_failures
