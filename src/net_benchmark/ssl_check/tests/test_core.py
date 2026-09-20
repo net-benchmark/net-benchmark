@@ -298,10 +298,28 @@ class TestEngineSingleTarget:
         assert result.certificate is not None
         assert result.hostname_match.value == "match"
 
-    async def test_unreachable_target_not_measured(self, unused_tcp_port: int) -> None:
+    async def test_unreachable_target_not_measured(
+        self, unreachable_target: Tuple[str, int]
+    ) -> None:
+        host, port = unreachable_target
         engine = SSLCheckEngine(connect_timeout=2)
-        result = await engine.check_target(SSLTarget("127.0.0.1", unused_tcp_port))
-        assert result.status is HandshakeStatus.TCP_REFUSED
+        result = await engine.check_target(SSLTarget(host, port))
+        # unreachable_target guarantees "genuinely unreachable" without a
+        # race, but not which specific failure mode a bound-but-never-
+        # listening socket produces -- confirmed directly that this
+        # differs by platform: Linux's kernel sends an instant RST
+        # (TCP_REFUSED), macOS's does not and the connection attempt
+        # times out instead (TCP_TIMEOUT). This test's own point is "no
+        # timing gets fabricated for a failed connection," not which
+        # failure mode occurred, so it accepts either. Tests that
+        # specifically need TCP_REFUSED (e.g.
+        # test_refused_connection_does_not_trigger_backoff) mock
+        # ConnectionRefusedError directly instead, for a real
+        # cross-platform guarantee.
+        assert result.status in (
+            HandshakeStatus.TCP_REFUSED,
+            HandshakeStatus.TCP_TIMEOUT,
+        )
         assert result.measured is False
         assert result.handshake_ms is None, "no timing fabricated"
 
@@ -416,10 +434,26 @@ class TestBackoff:
     plain refusal, or a multi-port scan (most ports closed) crawls."""
 
     async def test_refused_connection_does_not_trigger_backoff(
-        self, unused_tcp_port: int
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        import asyncio
+
+        # This test specifically needs TCP_REFUSED, not just "some
+        # failure" -- it's the direct counterpart to
+        # test_timeout_triggers_backoff below, proving backoff fires on
+        # timeout-class failures but not on a plain refusal. A real
+        # socket can't guarantee TCP_REFUSED cross-platform (confirmed:
+        # a bound-but-never-listening socket times out on macOS instead
+        # of refusing), so this mocks the exact exception
+        # handshake.py's own probe_tls catches to produce TCP_REFUSED --
+        # deterministic on every platform, same monkeypatch pattern the
+        # adjacent timeout test already uses below.
+        async def _refuse(*args: object, **kwargs: object) -> None:
+            raise ConnectionRefusedError("mocked: connection refused")
+
+        monkeypatch.setattr(asyncio, "open_connection", _refuse)
         engine = SSLCheckEngine(connect_timeout=2, backoff_on_timeout=True)
-        await engine.check_target(SSLTarget("127.0.0.1", unused_tcp_port))
+        await engine.check_target(SSLTarget("127.0.0.1", 443))
         assert engine.get_failed_hosts().get("127.0.0.1") is None
 
     async def test_timeout_triggers_backoff(
@@ -438,7 +472,7 @@ class TestBackoff:
 
 class TestBatchFanOut:
     async def test_all_targets_return_a_result(
-        self, tls_server: TLSServerFactory, unused_tcp_port: int
+        self, tls_server: TLSServerFactory, unreachable_target: Tuple[str, int]
     ) -> None:
         handle = await tls_server()
         engine = SSLCheckEngine(
@@ -448,9 +482,10 @@ class TestBatchFanOut:
             connect_timeout=2,
             handshake_timeout=4,
         )
+        unreachable_host, unreachable_port = unreachable_target
         targets = [
             SSLTarget("localhost", handle.port, pinned_ip="127.0.0.1") for _ in range(4)
-        ] + [SSLTarget("127.0.0.1", unused_tcp_port)]
+        ] + [SSLTarget(unreachable_host, unreachable_port)]
         results = await engine.check_targets(targets)
         assert len(results) == 5
 
@@ -525,13 +560,14 @@ class TestPolicyEvaluation:
         assert any("remaining" in f for f in result.policy_failures)
 
     async def test_unreachable_target_stays_unevaluated(
-        self, unused_tcp_port: int
+        self, unreachable_target: Tuple[str, int]
     ) -> None:
         """An unreachable target has not FAILED policy — it was never
         assessed. Reporting it as non-compliant would bucket a down host with
         an expired certificate."""
+        host, port = unreachable_target
         engine = SSLCheckEngine(connect_timeout=2)
-        result = await engine.check_target(SSLTarget("127.0.0.1", unused_tcp_port))
+        result = await engine.check_target(SSLTarget(host, port))
         evaluate_policy(result, PolicyConfig(min_days_remaining=30))
         assert result.compliant is None
         assert result.policy_failures == []
@@ -758,6 +794,66 @@ class TestEvaluatePolicyPureUnit:
         evaluate_policy(result, PolicyConfig(expected_fingerprint="0" * 64))
         assert result.compliant is False
         assert any("does not match expected value" in f for f in result.policy_failures)
+
+    def test_expected_cipher_match(self) -> None:
+        result = make_result()
+        result.cipher_name = "TLS_AES_128_GCM_SHA256"
+        evaluate_policy(result, PolicyConfig(expected_cipher="tls_aes_128_gcm_sha256"))
+        assert not any("cipher" in f for f in result.policy_failures)
+
+    def test_expected_cipher_mismatch(self) -> None:
+        result = make_result()
+        result.cipher_name = "TLS_AES_128_GCM_SHA256"
+        evaluate_policy(result, PolicyConfig(expected_cipher="TLS_AES_256_GCM_SHA384"))
+        assert result.compliant is False
+        assert any("does not match expected" in f for f in result.policy_failures)
+
+    def test_expected_cipher_none_negotiated(self) -> None:
+        result = make_result()
+        result.cipher_name = None
+        evaluate_policy(result, PolicyConfig(expected_cipher="TLS_AES_128_GCM_SHA256"))
+        assert any("no cipher was negotiated" in f for f in result.policy_failures)
+
+    def test_expected_group_present(self) -> None:
+        from net_benchmark.ssl_check.deep_introspection import (
+            DeepIntrospectionResult,
+            NamedGroupsResult,
+        )
+
+        result = make_result()
+        result.deep_introspection = DeepIntrospectionResult(
+            attempted=True,
+            named_groups=NamedGroupsResult(
+                attempted=True, groups=["X25519", "SECP256R1"]
+            ),
+        )
+        evaluate_policy(result, PolicyConfig(expected_group="x25519"))
+        assert not any("group" in f for f in result.policy_failures)
+
+    def test_expected_group_missing(self) -> None:
+        from net_benchmark.ssl_check.deep_introspection import (
+            DeepIntrospectionResult,
+            NamedGroupsResult,
+        )
+
+        result = make_result()
+        result.deep_introspection = DeepIntrospectionResult(
+            attempted=True,
+            named_groups=NamedGroupsResult(attempted=True, groups=["SECP256R1"]),
+        )
+        evaluate_policy(result, PolicyConfig(expected_group="X25519"))
+        assert result.compliant is False
+        assert any(
+            "not among the target's negotiable" in f for f in result.policy_failures
+        )
+
+    def test_expected_group_without_deep_introspection(self) -> None:
+        """Never a silent pass — the check did not run at all, so this is
+        reported as its own explicit failure, not skipped quietly.
+        """
+        result = make_result()
+        evaluate_policy(result, PolicyConfig(expected_group="X25519"))
+        assert any("was not checked" in f for f in result.policy_failures)
 
     def test_revocation_source_required_and_missing(self) -> None:
         """The actual failing case — distinct from the short-lived
