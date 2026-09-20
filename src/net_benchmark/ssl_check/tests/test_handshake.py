@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from typing import Callable, Coroutine
+from typing import Callable, Coroutine, Tuple
 
 import pytest
 from cryptography import x509
@@ -185,10 +185,20 @@ class TestProbeTLS:
         assert result.tls_version is TLSVersion.TLSV1_2
         assert result.tls_version.is_deprecated is False
 
-    async def test_connection_refused(self, unused_tcp_port: int) -> None:
+    async def test_connection_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Needs a real, deterministic TCP_REFUSED -- a bound-but-never-
+        # listening socket doesn't guarantee that cross-platform
+        # (confirmed: times out on macOS instead of refusing, unlike
+        # Linux). Mocks the exact exception probe_tls's own connection
+        # attempt catches to produce TCP_REFUSED, same pattern
+        # test_tcp_timeout already uses in this file for the timeout case.
+        async def _refuse(*args: object, **kwargs: object) -> None:
+            raise ConnectionRefusedError("mocked: connection refused")
+
+        monkeypatch.setattr(asyncio, "open_connection", _refuse)
         result = await probe_tls(
             "127.0.0.1",
-            unused_tcp_port,
+            443,
             config=ProbeConfig(connect_timeout=3),
         )
         assert result.status is HandshakeStatus.TCP_REFUSED
@@ -474,16 +484,21 @@ class TestHandshakeResultToDict:
         )
 
     async def test_failed_result_has_no_fabricated_timing(
-        self, unused_tcp_port: int
+        self, unreachable_target: Tuple[str, int]
     ) -> None:
         import json
 
-        result = await probe_tls(
-            "127.0.0.1", unused_tcp_port, config=ProbeConfig(connect_timeout=2)
-        )
+        # This test's own point is that a failed result's to_dict() is
+        # JSON-safe with no fabricated timing fields -- not which
+        # specific failure mode occurred, so accepting either genuinely
+        # unreachable outcome (see test_unreachable_target_not_measured
+        # in test_core.py for why both are legitimate here) is correct,
+        # not a weakened assertion.
+        host, port = unreachable_target
+        result = await probe_tls(host, port, config=ProbeConfig(connect_timeout=2))
         payload = result.to_dict()
         json.dumps(payload)
-        assert payload["status"] == "tcp_refused"
+        assert payload["status"] in ("tcp_refused", "tcp_timeout")
         assert payload["handshake_ms"] is None
         assert payload["cipher_iana_hex"] is None
 
