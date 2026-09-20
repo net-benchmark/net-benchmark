@@ -354,6 +354,21 @@ def _parse_starttls_override(raw: Optional[str]) -> Optional[StartTLSProtocol]:
     help="Flag a certificate that does not match this SHA-256 fingerprint "
     "(certificate or SPKI, hex or base64).",
 )
+# ── policy thresholds (0.6.2 item 26) ──
+@click.option(
+    "--expected-cipher",
+    default=None,
+    help="Flag a target whose primary handshake did not negotiate exactly "
+    "this cipher (OpenSSL name, case-insensitive).",
+)
+@click.option(
+    "--expected-group",
+    default=None,
+    help="Flag a target that does not negotiate this named group at all. "
+    "Checks negotiability via --deep-introspection's data (that flag must "
+    "also be passed), not necessarily what the primary handshake itself "
+    "picked — stdlib ssl has no public API for that before Python 3.13.",
+)
 @click.option(
     "--allow-hostname-mismatch",
     is_flag=True,
@@ -501,6 +516,136 @@ def _parse_starttls_override(raw: Optional[str]) -> Optional[StartTLSProtocol]:
     "pass/fail check — shared virtual hosting is normal. No network cost, "
     "computed from results already collected.",
 )
+# ── TLS deep introspection via CryptoLyzer (0.6.2 items 1-9) ──
+@click.option(
+    "--deep-introspection",
+    is_flag=True,
+    help="Named groups, DH parameters and ephemeral key reuse, "
+    "renegotiation/extension audit, signature algorithm probing, TLS 1.3 "
+    "cipher enumeration, and version/draft detection via CryptoLyzer — "
+    "reaches past what OpenSSL-bound stdlib ssl can ever observe. "
+    "Requires the [crypto] extra; implicit TLS targets only in this "
+    "release (skipped for --starttls targets). Reports as unavailable, "
+    "not an error, when not installed.",
+)
+@click.option(
+    "--crypto-executor-workers",
+    default=10,
+    show_default=True,
+    help="Thread pool size for --deep-introspection (CryptoLyzer is "
+    "synchronous; this bounds how many of its probes run concurrently).",
+)
+# ── SSL Labs-style grade (0.6.2 items 20-21) ──
+@click.option(
+    "--grade",
+    "compute_grade",
+    is_flag=True,
+    help="Score each target against the published SSL Labs Server Rating "
+    "Guide (rubric version recorded in the output). No network cost of "
+    "its own — scores whatever --enumerate-protocol/--deep-introspection "
+    "already collected; without those, the grade is best-effort with data "
+    "gaps named explicitly rather than guessed.",
+)
+# ── Server Side TLS profile compliance (0.6.2 item 21) ──
+@click.option(
+    "--check-mozilla-profiles",
+    is_flag=True,
+    help="Check compliance against the published Server Side TLS "
+    "guidelines (formerly hosted by Mozilla, now published by TLSRef at "
+    "data.tlsref.org — same guidelines lineage and authors). Checks every "
+    "profile the current guidelines document contains (Modern and "
+    "Intermediate as of the current guideline version; 'Old' was removed "
+    "upstream). Fetches once per scan, not once per target.",
+)
+@click.option(
+    "--mozilla-profile",
+    "mozilla_profiles",
+    multiple=True,
+    help="Limit --check-mozilla-profiles to specific profile names (e.g. "
+    "--mozilla-profile modern). Repeatable. Defaults to every profile the "
+    "guidelines document contains.",
+)
+# ── SPKI pin set generation (0.6.2 item 25) ──
+@click.option(
+    "--generate-pin-set",
+    "generate_pin_set_flag",
+    is_flag=True,
+    help="Generate an SPKI pin set (leaf + backup pins from the validated "
+    "chain) for certificate pinning. Requires --verify-chain for backup "
+    "pins; without it, only a single (fragile) leaf pin is produced.",
+)
+@click.option(
+    "--pin-set-no-root",
+    is_flag=True,
+    help="Exclude the trust-anchor root from --generate-pin-set's output.",
+)
+# ── client simulation (0.6.2 item 23) ──
+@click.option(
+    "--simulate-clients",
+    is_flag=True,
+    help="Check which real browser/library versions can complete a "
+    "handshake with this target, via CryptoLyzer's per-client TLS "
+    "capability data. Expensive: roughly 70 real handshake attempts per "
+    "target. Requires the [crypto] extra; implicit TLS targets only.",
+)
+# ── JARM server fingerprinting (0.6.2 item 24) ──
+@click.option(
+    "--jarm",
+    "compute_jarm",
+    is_flag=True,
+    help="Compute a JARM fingerprint (Salesforce's active TLS server "
+    "fingerprinting scheme) for each target. JA4S is not included — see "
+    "the docs for why. Requires the [crypto] extra; implicit TLS targets "
+    "only.",
+)
+@click.option(
+    "--jarm-timeout",
+    default=20.0,
+    show_default=True,
+    help="Per-target timeout in seconds for --jarm.",
+)
+# ── full multi-store trust validation (0.6.2 item 22) ──
+@click.option(
+    "--check-multi-store",
+    is_flag=True,
+    help="Validate the certificate chain against Apple's, Google's "
+    "(Chrome), and Microsoft's own root programs, in addition to the "
+    "Mozilla+system default --verify-chain already uses. Reports whether "
+    "the stores agree. Requires --verify-chain; Microsoft's check needs "
+    "the [crypto] extra.",
+)
+# ── multi-SAN audit against active subdomains (0.6.2 item 27) ──
+@click.option(
+    "--audit-san",
+    is_flag=True,
+    help="For each literal (non-wildcard) DNS SAN entry on the "
+    "certificate, check whether it resolves and serves this same "
+    "certificate — surfaces unused SAN coverage and SAN/DNS "
+    "inconsistencies. Capped at 25 entries per certificate by default "
+    "(--san-audit-max-entries).",
+)
+@click.option(
+    "--san-audit-max-entries",
+    default=25,
+    show_default=True,
+    help="Cap on SAN entries probed per certificate for --audit-san.",
+)
+# ── TLS 1.3 0-RTT timing (0.6.2 item 11) ──
+@click.option(
+    "--measure-0rtt",
+    is_flag=True,
+    help="Measure the actual latency of a full handshake vs. session-"
+    "resumed vs. session-resumed-with-early-data (0-RTT), and report "
+    "whether the target accepted the early data. Requires the system "
+    "openssl CLI — no Python library exposes early-data support. "
+    "Implicit TLS targets only.",
+)
+@click.option(
+    "--zero-rtt-timeout",
+    default=10.0,
+    show_default=True,
+    help="Per-connection timeout in seconds for --measure-0rtt.",
+)
 # ── item 55 ──
 @click.option(
     "--as-of",
@@ -563,6 +708,8 @@ def check(
     min_tls_version: Optional[str],
     expected_issuer: Optional[str],
     expected_fingerprint: Optional[str],
+    expected_cipher: Optional[str],
+    expected_group: Optional[str],
     allow_hostname_mismatch: bool,
     require_forward_secrecy: bool,
     allow_weak_key: bool,
@@ -585,6 +732,21 @@ def check(
     lint: bool,
     check_dual_stack: bool,
     detect_virtual_hosting: bool,
+    deep_introspection: bool,
+    crypto_executor_workers: int,
+    compute_grade: bool,
+    check_mozilla_profiles: bool,
+    mozilla_profiles: Tuple[str, ...],
+    generate_pin_set_flag: bool,
+    pin_set_no_root: bool,
+    simulate_clients: bool,
+    compute_jarm: bool,
+    jarm_timeout: float,
+    check_multi_store: bool,
+    audit_san: bool,
+    san_audit_max_entries: int,
+    measure_0rtt: bool,
+    zero_rtt_timeout: float,
     as_of: Optional[str],
     output: str,
     formats: str,
@@ -706,6 +868,21 @@ def check(
             check_ct_logs=check_ct_logs,
             lint=lint,
             check_dual_stack=check_dual_stack,
+            deep_introspection=deep_introspection,
+            crypto_executor_workers=crypto_executor_workers,
+            grade=compute_grade,
+            check_mozilla_profiles=check_mozilla_profiles,
+            mozilla_profiles=list(mozilla_profiles) or None,
+            generate_pin_set_output=generate_pin_set_flag,
+            pin_set_include_root=not pin_set_no_root,
+            simulate_clients=simulate_clients,
+            jarm=compute_jarm,
+            jarm_timeout=jarm_timeout,
+            check_multi_store=check_multi_store,
+            audit_san=audit_san,
+            san_audit_max_entries=san_audit_max_entries,
+            measure_zero_rtt=measure_0rtt,
+            zero_rtt_timeout=zero_rtt_timeout,
         )
 
         progress_bar = None
@@ -747,6 +924,8 @@ def check(
             min_tls_version=tls_floor,
             expected_issuer=expected_issuer,
             expected_fingerprint=expected_fingerprint,
+            expected_cipher=expected_cipher,
+            expected_group=expected_group,
             require_hostname_match=not allow_hostname_mismatch,
             require_forward_secrecy=require_forward_secrecy,
             reject_weak_key=not allow_weak_key,
