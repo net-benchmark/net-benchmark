@@ -79,7 +79,7 @@ jobs:
     outputs:
       lean_digest: ${{ steps.digest.outputs.lean_digest }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
@@ -130,7 +130,7 @@ jobs:
       matrix:
         target: [final-lean, final-pdf]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v4
 
