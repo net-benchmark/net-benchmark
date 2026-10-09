@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import socket
 import ssl
 from pathlib import Path
 from typing import (
+    Any,
     AsyncIterator,
     Callable,
     Coroutine,
@@ -221,16 +223,23 @@ async def tls_server(
     one) can start each with its own certificate. All started servers are
     closed on teardown regardless of how the test exits.
 
-    IMPORTANT — every caller must connect with `pinned_ip="127.0.0.1"`
-    (via `ProbeConfig` or `SSLTarget`), never bare hostname resolution.
-    This server binds to 127.0.0.1 only, but `getaddrinfo("localhost", ...)`
-    order is OS-dependent: it returns IPv4 first on this project's Linux CI
-    and sandbox, but returns the IPv6 loopback (::1) first on macOS — where
-    nothing is listening, producing a confusing TCP_REFUSED that has nothing
-    to do with the certificate or handshake logic actually under test. Pinning
-    bypasses getaddrinfo entirely rather than depending on its return order,
-    while leaving the "localhost" string in place for SNI and hostname
-    matching, which is what the certificates in these fixtures are issued for.
+    IMPORTANT — never rely on bare hostname resolution to reach this server.
+    It binds to 127.0.0.1 only, but the order `getaddrinfo("localhost", ...)`
+    returns is a property of the machine's resolver configuration, not of the
+    OS family. Confirmed directly: 127.0.0.1 first on a macOS dev machine,
+    ::1 first on GitHub's ubuntu-latest runners (where nothing listens on
+    ::1, so the connection fails for a reason that has nothing to do with the
+    certificate or handshake logic under test), and a sandbox whose
+    /etc/hosts lists only 127.0.0.1 never sees ::1 at all. A test can
+    therefore pass on one machine and fail on another with no code change.
+
+    Two ways to stay deterministic. Where the code under test accepts one,
+    connect with `pinned_ip="127.0.0.1"` (via `ProbeConfig` or `SSLTarget`):
+    that bypasses getaddrinfo entirely while leaving the "localhost" string
+    in place for SNI and hostname matching, which is what the certificates in
+    these fixtures are issued for. Where it does not -- SAN auditing and the
+    CryptoLyzer-backed deep-introspection probes take a bare host string --
+    opt the module into `localhost_resolves_to_ipv4` below.
     """
     handles: List[TLSServerHandle] = []
 
@@ -261,6 +270,40 @@ async def tls_server(
 
     for handle in handles:
         handle.close()
+
+
+@pytest.fixture
+def localhost_resolves_to_ipv4(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the name `localhost` resolve to 127.0.0.1 only, for a test that
+    has to probe a *hostname* rather than an IP.
+
+    `tls_server` binds 127.0.0.1 only (see its docstring for why bare
+    resolution of "localhost" can't be depended on). Most callers can pin the
+    IP instead; the ones that take just a host string cannot -- an audited
+    SAN is its own hostname, and the CryptoLyzer-backed deep-introspection
+    probes have no pin option. Opt a whole module in with
+    `pytestmark = pytest.mark.usefixtures("localhost_resolves_to_ipv4")`.
+
+    Rewrites only the literal name "localhost", and only for the duration of
+    the test: every other lookup -- including the deliberately non-resolving
+    `.invalid` names some tests depend on -- still reaches the real resolver.
+    The "localhost" string itself is untouched wherever the code under test
+    passes it on for SNI, so certificate and hostname matching are still
+    exercised for real.
+
+    Patches `socket.getaddrinfo`, which both asyncio's `loop.getaddrinfo` and
+    `socket.create_connection` look up at call time (checked against the
+    stdlib source rather than assumed), and which the worker threads of a
+    ThreadPoolExecutor share with the test process.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if host == "localhost":
+            host = "127.0.0.1"
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo)
 
 
 # ---------------------------------------------------------------------------
