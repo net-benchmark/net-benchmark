@@ -56,12 +56,14 @@ from net_benchmark.ssl_check.enumeration import (
 from net_benchmark.ssl_check.topology import MultiCertGroup
 
 __all__ = [
+    "HostGrade",
     "ReportBranding",
     "SSLCSVExporter",
     "SSLExcelExporter",
     "SSLExportBundle",
     "SSLPDFExporter",
     "build_provenance",
+    "compute_host_grades",
 ]
 
 
@@ -296,6 +298,13 @@ def _compute_host_grades(results: Sequence[SSLResult]) -> List[HostGrade]:
                 grade.policy_failures.append(failure)
 
     return list(grades.values())
+
+
+# --- 0.6.2: public name for library consumers. buildtools.net persists this
+# exact per-host rollup (SSLTargetStatistic), so the dashboard shows the same
+# chain/grade/cipher verdict the Excel and PDF exports do. Same function, not
+# a copy; the private name stays for the exporters and existing tests.
+compute_host_grades = _compute_host_grades
 
 
 def _raw_rows(results: Sequence[SSLResult]) -> List[Dict[str, Any]]:
