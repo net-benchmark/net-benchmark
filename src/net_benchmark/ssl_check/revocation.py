@@ -734,7 +734,10 @@ async def check_revocation(
             )
             return audit
         fetched, fetch_error = await fetch_issuer_certificate(
-            client, revocation_endpoints.ca_issuer_urls, timeout=ocsp_timeout
+            client,
+            revocation_endpoints.ca_issuer_urls,
+            timeout=ocsp_timeout,
+            expected_subject=leaf.issuer,
         )
         if fetched is None:
             audit.check_errors.append(fetch_error or "issuer certificate fetch failed")

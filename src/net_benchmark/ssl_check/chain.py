@@ -22,11 +22,11 @@ requests rather than re-fetching them.
 
 Trust store
 -----------
-Seeded from certifi's Mozilla bundle. The roadmap line for item 13 also asks
-for "system roots" — there is no portable, dependency-free way to enumerate
-the OS trust store from Python (this is what packages like `truststore` exist
-for), so that half of item 13 is not implemented here. `trust_anchor_paths`
-lets a caller supply additional PEM roots explicitly instead.
+Seeded from certifi's Mozilla bundle plus whatever OS store OpenSSL's default
+verify paths expose (see `_load_system_roots` for where that reaches and
+where it doesn't). `trust_anchor_paths` lets a caller supply additional PEM
+roots explicitly. All bundles are parsed one certificate at a time (see
+`load_pem_bundle`) so a single non-conforming root can never empty a store.
 
 Why `cryptography.x509.verification` rather than a hand-rolled loop
 ---------------------------------------------------------------------
@@ -54,7 +54,9 @@ invocation and every existing test is unaffected by this module's presence.
 from __future__ import annotations
 
 import ipaddress
+import re
 import ssl
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -65,6 +67,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import httpx
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding, pkcs7
+from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.x509.verification import (
     PolicyBuilder,
     ServerVerifier,
@@ -227,10 +230,74 @@ class ChainAudit:
 # ---------------------------------------------------------------------------
 
 
+# --- 0.6.2: one PEM block at a time. Several roots Mozilla still ships
+# (GoDaddy/Starfield Root G2, SECOM RootCA2, both HARICA 2015 roots) carry
+# serial number 0, which RFC 5280 forbids. cryptography >= 46 warns on each
+# of them and has announced it will raise ValueError in a future release;
+# `load_pem_x509_certificates` over a whole bundle would then fail the
+# entire bundle for the sake of one root. Parsing block-by-block confines
+# any such failure to the one certificate that caused it.
+_PEM_CERT_RE = re.compile(
+    rb"-----BEGIN CERTIFICATE-----\r?\n.+?\r?\n-----END CERTIFICATE-----",
+    re.DOTALL,
+)
+
+_NON_POSITIVE_SERIAL_WARNING = "Parsed a serial number which wasn't positive"
+
+
+def load_pem_bundle(data: bytes) -> List[x509.Certificate]:
+    """Parse every certificate in a PEM bundle, skipping any single one that
+    fails to parse rather than rejecting the whole bundle.
+
+    For trust-anchor bundles only (certifi, the OS store, vendor stores,
+    caller-supplied roots): the non-positive-serial deprecation warning is
+    suppressed here because those roots are trusted by the store's own
+    publisher regardless, and the warning otherwise fires once per affected
+    root per bundle on every fresh process — noise in the SaaS worker logs
+    with nothing for an operator to act on. Certificates from a scanned
+    target are never loaded through this function, so a target presenting
+    such a serial is not silenced by it.
+    """
+    certs: List[x509.Certificate] = []
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=_NON_POSITIVE_SERIAL_WARNING,
+            category=CryptographyDeprecationWarning,
+        )
+        for block in _PEM_CERT_RE.findall(data):
+            try:
+                certs.append(x509.load_pem_x509_certificate(block))
+            except ValueError:
+                continue
+    return certs
+
+
+def _dedupe_certificates(
+    certs: Sequence[x509.Certificate],
+) -> List[x509.Certificate]:
+    """Drop exact-DER duplicates, keeping first occurrence order.
+
+    certifi and the OS bundle are both Mozilla-derived, and a Debian-style
+    `capath` holds every root again (hash-named symlinks plus the
+    concatenated `ca-certificates.crt` itself), so without this the same
+    root lands in the `Store` up to four times.
+    """
+    seen: Set[bytes] = set()
+    unique: List[x509.Certificate] = []
+    for cert in certs:
+        der = cert.public_bytes(Encoding.DER)
+        if der in seen:
+            continue
+        seen.add(der)
+        unique.append(cert)
+    return unique
+
+
 @lru_cache(maxsize=8)
 def _load_pem_roots(pem_path: str) -> Tuple[x509.Certificate, ...]:
     data = Path(pem_path).read_bytes()
-    return tuple(x509.load_pem_x509_certificates(data))
+    return tuple(load_pem_bundle(data))
 
 
 def _load_system_roots() -> List[x509.Certificate]:
@@ -247,8 +314,8 @@ def _load_system_roots() -> List[x509.Certificate]:
     but where either path exists this reaches it with nothing new to install.
 
     Never raises: a platform where neither path resolves, or where a file
-    fails to parse, falls back to certifi alone, exactly as before this was
-    added.
+    fails to read or parse, falls back to certifi alone, exactly as before
+    this was added.
     """
     roots: List[x509.Certificate] = []
     try:
@@ -260,8 +327,8 @@ def _load_system_roots() -> List[x509.Certificate]:
         cafile = Path(paths.cafile)
         if cafile.is_file():
             try:
-                roots.extend(x509.load_pem_x509_certificates(cafile.read_bytes()))
-            except ValueError:
+                roots.extend(load_pem_bundle(cafile.read_bytes()))
+            except OSError:
                 pass
 
     if paths.capath:
@@ -270,12 +337,12 @@ def _load_system_roots() -> List[x509.Certificate]:
             for entry in capath.iterdir():
                 if not entry.is_file():
                     continue
+                # Not every entry is a parseable PEM cert on every
+                # distribution's layout; `load_pem_bundle` yields nothing
+                # for those rather than raising.
                 try:
-                    roots.append(x509.load_pem_x509_certificate(entry.read_bytes()))
-                except ValueError:
-                    # Not every hash-named entry is a parseable PEM cert on
-                    # every distribution's layout; skipped rather than
-                    # treated as a fatal error for the whole store.
+                    roots.extend(load_pem_bundle(entry.read_bytes()))
+                except OSError:
                     continue
     return roots
 
@@ -293,13 +360,11 @@ def default_trust_store(extra_pem_paths: Tuple[str, ...] = ()) -> Store:
     """
     import certifi
 
-    roots: List[x509.Certificate] = list(
-        x509.load_pem_x509_certificates(Path(certifi.where()).read_bytes())
-    )
+    roots: List[x509.Certificate] = load_pem_bundle(Path(certifi.where()).read_bytes())
     roots.extend(_load_system_roots())
     for pem_path in extra_pem_paths:
         roots.extend(_load_pem_roots(pem_path))
-    return Store(roots)
+    return Store(_dedupe_certificates(roots))
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +373,9 @@ def default_trust_store(extra_pem_paths: Tuple[str, ...] = ()) -> Store:
 
 
 def _parse_fetched_certificate(
-    body: bytes, content_type: Optional[str]
+    body: bytes,
+    content_type: Optional[str],
+    expected_subject: Optional[x509.Name] = None,
 ) -> Optional[x509.Certificate]:
     """Best-effort parse of an AIA CA Issuers response.
 
@@ -318,22 +385,35 @@ def _parse_fetched_certificate(
     are tried regardless of the declared content-type — CAs are not
     consistent about setting it correctly, and guessing from content is what
     every TLS client's chain-building code actually does.
+
+    PEM and PKCS#7 responses can carry several certificates (a `.p7c` is
+    typically the CA plus its cross-certificates), and RFC 5280 4.2.2.1
+    does not fix their order. When `expected_subject` is given, the
+    certificate whose subject matches it — the issuer actually being looked
+    for — is returned; the first certificate is only a fallback when none
+    matches or no subject was supplied.
     """
-    for loader in (
-        x509.load_der_x509_certificate,
-        x509.load_pem_x509_certificate,
-    ):
-        try:
-            return loader(body)
-        except ValueError:
-            continue
     try:
-        bundle = pkcs7.load_der_pkcs7_certificates(body)
+        return x509.load_der_x509_certificate(body)
     except ValueError:
-        bundle = None
-    if bundle:
-        return bundle[0]
-    return None
+        pass
+
+    candidates: List[x509.Certificate] = []
+    try:
+        candidates = x509.load_pem_x509_certificates(body)
+    except ValueError:
+        try:
+            candidates = pkcs7.load_der_pkcs7_certificates(body)
+        except ValueError:
+            candidates = []
+    if not candidates:
+        return None
+
+    if expected_subject is not None:
+        for candidate in candidates:
+            if candidate.subject == expected_subject:
+                return candidate
+    return candidates[0]
 
 
 async def fetch_issuer_certificate(
@@ -341,9 +421,14 @@ async def fetch_issuer_certificate(
     urls: Sequence[str],
     *,
     timeout: float,
+    expected_subject: Optional[x509.Name] = None,
 ) -> Tuple[Optional[x509.Certificate], Optional[str]]:
     """Try each CA Issuers URL in order; return the first certificate that
     parses, or (None, last_error).
+
+    `expected_subject` is the child certificate's `issuer` name; see
+    `_parse_fetched_certificate` on how it picks among multi-certificate
+    responses. Optional so existing callers keep their behaviour.
     """
     last_error: Optional[str] = None
     for url in urls:
@@ -369,7 +454,9 @@ async def fetch_issuer_certificate(
             last_error = f"{url}: response exceeded {DEFAULT_MAX_FETCH_BYTES} bytes"
             continue
 
-        certificate = _parse_fetched_certificate(bytes(body), content_type)
+        certificate = _parse_fetched_certificate(
+            bytes(body), content_type, expected_subject
+        )
         if certificate is None:
             last_error = f"{url}: response did not parse as a certificate"
             continue
@@ -474,7 +561,10 @@ async def _build_path(
             break
 
         next_cert, fetch_error = await fetch_issuer_certificate(
-            client, endpoints.ca_issuer_urls, timeout=fetch_timeout
+            client,
+            endpoints.ca_issuer_urls,
+            timeout=fetch_timeout,
+            expected_subject=frontier.issuer,
         )
         if fetch_error:
             fetch_errors.append(fetch_error)
@@ -663,5 +753,6 @@ __all__ = [
     "ChainAudit",
     "default_trust_store",
     "fetch_issuer_certificate",
+    "load_pem_bundle",
     "build_chain_audit",
 ]
