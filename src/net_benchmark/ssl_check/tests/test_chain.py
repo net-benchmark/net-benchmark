@@ -21,6 +21,7 @@ needs a validatable chain.
 from __future__ import annotations
 
 import datetime
+import warnings
 from typing import Optional, Tuple
 
 import httpx
@@ -28,7 +29,8 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.hazmat.primitives.serialization import Encoding, pkcs7
+from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.x509.oid import (
     AuthorityInformationAccessOID,
     ExtendedKeyUsageOID,
@@ -42,6 +44,7 @@ from net_benchmark.ssl_check.chain import (
     build_chain_audit,
     default_trust_store,
     fetch_issuer_certificate,
+    load_pem_bundle,
 )
 
 UTC = datetime.timezone.utc
@@ -668,6 +671,47 @@ class TestFetchIssuerCertificate:
         assert error is not None
         assert "b.der" in error
 
+    async def test_pkcs7_bundle_picks_expected_subject(
+        self, fixture: ChainFixture
+    ) -> None:
+        # Root first, intermediate second: the wanted issuer is not bundle[0].
+        body = pkcs7.serialize_certificates(
+            [fixture.root_cert, fixture.intermediate_cert], Encoding.DER
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=body, headers={"content-type": "application/pkcs7-mime"}
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            cert, error = await fetch_issuer_certificate(
+                client,
+                ["https://ca.example/int.p7c"],
+                timeout=5.0,
+                expected_subject=fixture.intermediate_cert.subject,
+            )
+        assert error is None
+        assert cert is not None
+        assert cert.subject.rfc4514_string() == "CN=Test Intermediate CA"
+
+    async def test_pkcs7_bundle_without_expected_subject_falls_back_to_first(
+        self, fixture: ChainFixture
+    ) -> None:
+        body = pkcs7.serialize_certificates(
+            [fixture.root_cert, fixture.intermediate_cert], Encoding.DER
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=body)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            cert, _ = await fetch_issuer_certificate(
+                client, ["https://ca.example/int.p7c"], timeout=5.0
+            )
+        assert cert is not None
+        assert cert.subject.rfc4514_string() == "CN=Test Root CA"
+
 
 # ---------------------------------------------------------------------------
 # default_trust_store
@@ -683,3 +727,34 @@ class TestDefaultTrustStore:
         # lru_cache keyed on the (empty) extra_pem_paths tuple -- same
         # object back, not a re-parse of certifi's ~150 roots.
         assert default_trust_store() is default_trust_store()
+
+    def test_certifi_load_emits_no_serial_deprecation_warning(self) -> None:
+        # certifi ships Mozilla roots with serial 0 (GoDaddy/Starfield G2,
+        # SECOM RootCA2, HARICA 2015). Bypass the cache so the parse
+        # actually runs inside this test.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            default_trust_store.__wrapped__()
+        assert not [
+            w for w in caught if issubclass(w.category, CryptographyDeprecationWarning)
+        ]
+
+
+class TestLoadPemBundle:
+    def test_bad_block_skipped_not_fatal(self, fixture: ChainFixture) -> None:
+        good_a = fixture.root_cert.public_bytes(Encoding.PEM)
+        good_b = fixture.intermediate_cert.public_bytes(Encoding.PEM)
+        bad = b"-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n"
+        certs = load_pem_bundle(good_a + bad + good_b)
+        assert [c.subject.rfc4514_string() for c in certs] == [
+            "CN=Test Root CA",
+            "CN=Test Intermediate CA",
+        ]
+
+    def test_non_pem_input_yields_nothing(self) -> None:
+        assert load_pem_bundle(b"\x00\x01 not a pem file") == []
+
+    def test_duplicates_removed_from_store_input(self, fixture: ChainFixture) -> None:
+        certs = [fixture.root_cert, fixture.intermediate_cert, fixture.root_cert]
+        unique = chain_module._dedupe_certificates(certs)
+        assert len(unique) == 2

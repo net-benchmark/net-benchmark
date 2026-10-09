@@ -808,9 +808,8 @@ class SSLCheckEngine:
         verify_chain: bool = False,
         chain_timeout: float = DEFAULT_AIA_TIMEOUT,
         max_chain_depth: int = DEFAULT_MAX_CHAIN_DEPTH,
-        # Extra PEM files of trust anchors, added to certifi's bundle. See
-        # `chain.default_trust_store` on why there is no "system roots"
-        # equivalent here.
+        # Extra PEM files of trust anchors, added to certifi's bundle and the
+        # OS store. See `chain.default_trust_store`.
         trust_anchor_paths: Optional[Sequence[Path]] = None,
         # Item 15, and only ever attempted when `verify_chain` is also True.
         # A second, independent AIA walk beyond what completing the chain

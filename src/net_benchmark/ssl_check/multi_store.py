@@ -139,7 +139,15 @@ def _microsoft_bundle_path() -> Optional[Path]:
 
 
 def _build_store(pem_bytes: bytes) -> Store:
-    certs = x509.load_pem_x509_certificates(pem_bytes)
+    # --- 0.6.2: per-block parse via `chain.load_pem_bundle`, so one
+    # non-conforming root cannot mark a whole vendor store unavailable.
+    # Empty result still raises ValueError, preserving the
+    # "vendor bundle unusable" path callers already handle.
+    from net_benchmark.ssl_check.chain import load_pem_bundle
+
+    certs = load_pem_bundle(pem_bytes)
+    if not certs:
+        raise ValueError("no parseable certificates in bundle")
     return Store(certs)
 
 
