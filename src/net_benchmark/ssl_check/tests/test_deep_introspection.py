@@ -5,6 +5,14 @@ path; skipped entirely otherwise. Every probe does real socket I/O against
 real local TLS servers (the `tls_server` factory from `conftest.py`) or a
 live target — there's no meaningful way to mock "what does this protocol
 analyzer's own independent stack observe".
+
+The probes take a bare host string with no way to pin an address, and the
+local servers bind 127.0.0.1 only, so the module opts into
+`localhost_resolves_to_ipv4` (see `conftest.py`): the order
+`getaddrinfo("localhost")` returns differs between machines (::1 first on
+GitHub's ubuntu runners, where nothing is listening). These tests are
+skipped on CI today only because it doesn't install the `[crypto]` extra —
+without the fixture they would fail the moment it did.
 """
 
 from __future__ import annotations
@@ -30,6 +38,8 @@ from net_benchmark.ssl_check.deep_introspection import (  # noqa: E402
     probe_versions,
     probe_vulnerabilities,
 )
+
+pytestmark = pytest.mark.usefixtures("localhost_resolves_to_ipv4")
 
 
 @pytest.fixture

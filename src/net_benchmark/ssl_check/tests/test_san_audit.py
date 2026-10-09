@@ -1,17 +1,28 @@
 """Tests for `net_benchmark.ssl_check.san_audit`.
 
 Every scenario runs against real local TLS servers and real DNS resolution
-(genuine `nonexistent-subdomain...` lookups, genuine `localhost`
-resolution) — there's no meaningful way to mock "does this hostname
-resolve and serve this certificate" without losing the point of the test.
+(genuine `nonexistent-subdomain...` lookups) — there's no meaningful way to
+mock "does this hostname resolve and serve this certificate" without losing
+the point of the test.
+
+The one name that is not resolved for real is `localhost`: the module opts
+into `localhost_resolves_to_ipv4` (see `conftest.py`). The local TLS servers
+bind 127.0.0.1 only, `audit_san_entries` probes each SAN by name with no way
+to pin an address (an audited SAN is its own hostname), and the order
+`getaddrinfo("localhost")` returns differs between machines — ::1 first on
+GitHub's ubuntu runners, where nothing is listening — so without the fixture
+these tests pass or fail depending on where they run.
 """
 
 from __future__ import annotations
 
+import pytest
 from cryptography import x509
 
 from net_benchmark.ssl_check.certificate import parse_certificate
 from net_benchmark.ssl_check.san_audit import audit_san_entries
+
+pytestmark = pytest.mark.usefixtures("localhost_resolves_to_ipv4")
 
 
 class TestAuditSanEntries:
