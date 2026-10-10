@@ -86,6 +86,8 @@ net-benchmark http load-test -t https://checkout.example.com/api/cart \
 ```bash
 pip install net-benchmark          # core
 pip install net-benchmark[pdf]     # with pdf export
+pip install net-benchmark[lint]    # with ssl check --lint (pkilint)
+pip install net-benchmark[crypto]  # with ssl check --deep-introspection, --simulate-clients, --jarm
 ```
 
 ### Docker
@@ -2115,11 +2117,15 @@ avviso preventivo — perché nessuno li monitora tra un rinnovo e l'altro.
 
 net-benchmark ti aiuta a:
 
-- 🔍 **Verificare l'intero handshake** — versione TLS negoziata, cipher suite (con codice IANA), ALPN, ripresa di sessione
+- 🔍 **Verificare l'intero handshake** — versione TLS negoziata, cipher suite (con codice IANA), ALPN, ripresa di sessione e (opzionale) tempistiche TLS 1.3 0-RTT
 - 📅 **Tracciare il ciclo di vita del certificato** — giorni rimanenti, conformità al periodo di validità CA/Browser Forum, un controllo predittivo su rinnovi che supererebbero un limite in procinto di restringersi
 - 🔑 **Segnalare crittografia debole** — chiavi sotto la soglia minima, hash di firma compromessi, versioni TLS obsolete
+- 🔗 **Validare la catena di fiducia** — recupero AIA, validazione del percorso contro le radici Mozilla/sistema (opzionale: anche Apple/Google/Microsoft), revoca OCSP/CRL, rilevamento cross-sign
+- 🕵️ **Andare oltre ciò che espone OpenSSL** — gruppi con nome (incluso post-quantistico), parametri DH, enumerazione delle cipher suite TLS 1.3, probing degli algoritmi di firma e segnalazione di vulnerabilità della superficie di configurazione, tramite l'extra opzionale `[crypto]`
+- 🏅 **Valutare secondo rubriche pubblicate** — la Server Rating Guide di SSL Labs e le linee guida Server Side TLS (TLSRef, ex Mozilla), entrambe valutate contro i documenti effettivamente pubblicati oggi, non un'approssimazione
+- 🔬 **Certificate Transparency, linting e fingerprinting** — stato di fiducia SCT/log, linting CA/Browser Forum Baseline Requirements (extra `[lint]`), fingerprinting server JARM, simulazione di client browser reali
 - 📬 **Controllare STARTTLS esplicitamente** — SMTP, IMAP, POP3, FTP, LDAP, con un override per porte non standard
-- 🚦 **Bloccare la CI in base alla policy** — `--threshold` fa fallire la build per target su un certificato in scadenza, un mismatch di hostname o una versione obsoleta
+- 🚦 **Bloccare la CI in base alla policy** — `--threshold` fa fallire la build per target su un certificato in scadenza, un mismatch di hostname, un cipher/gruppo inatteso o una versione obsoleta
 
 ##### Ideale per
 
@@ -2161,11 +2167,30 @@ proprio questo che rende il comando utilizzabile come step in CI.
 | `--check-resumption` | Testa il supporto alla ripresa di sessione TLS con una coppia di handshake dedicata |
 | `--min-days-remaining` | Segnala un certificato in scadenza entro N giorni |
 | `--min-tls-version` | Segnala una versione negoziata sotto questa soglia, es. `TLSv1.2` |
-| `--expected-issuer` / `--expected-fingerprint` | Segnala un certificato che non corrisponde a un issuer o fingerprint atteso |
+| `--expected-issuer` / `--expected-fingerprint` / `--expected-cipher` / `--expected-group` | Segnala un handshake/certificato che non corrisponde a un issuer, fingerprint, cipher o gruppo negoziabile atteso |
 | `--as-of` | Valuta ogni certificato a una data futura, ad es. per controllare cosa si romperà a una scadenza di rinnovo |
 | `--threshold` | Criterio di superamento/fallimento, es. `cert_expiry_days>30` (ripetibile, valutato per target, codice di uscita 1 su qualsiasi fallimento) |
 
 Riferimento completo dei flag: `net-benchmark ssl check --help`.
+
+#### Controlli più approfonditi (opzionali — ognuno aggiunge chiamate di rete o una dipendenza)
+
+| Flag | Cosa fa |
+|---|---|
+| `--verify-chain` | Recupera gli intermedi mancanti via AIA, valida contro Mozilla + trust di sistema |
+| `--check-multi-store` | Valida anche contro i root program di Apple, Google e Microsoft |
+| `--check-revocation` | Interroga OCSP e CRL per lo stato di revoca di ciascun certificato |
+| `--enumerate-protocol` | Enumera le versioni TLS supportate e le cipher suite TLS 1.2-e-inferiori, con rating A-F |
+| `--check-ct-logs` | Risolve gli SCT incorporati contro il registro dei log CT; riporta lo stato di fiducia dei log |
+| `--lint` | Linting CA/Browser Forum Baseline Requirements via pkilint (`pip install net-benchmark[lint]`) |
+| `--deep-introspection` | Gruppi con nome (incluso post-quantistico), parametri DH, estensioni, algoritmi di firma, cipher TLS 1.3, segnalazioni di vulnerabilità — via CryptoLyzer (`pip install net-benchmark[crypto]`) |
+| `--grade` | Valuta secondo la Server Rating Guide pubblicata da SSL Labs |
+| `--check-mozilla-profiles` | Verifica la conformità alle linee guida Server Side TLS (TLSRef) |
+| `--simulate-clients` | Quali browser/librerie reali riescono a completare un handshake con questo target |
+| `--jarm` | Calcola un fingerprint server JARM |
+| `--audit-san` | Verifica se ogni voce SAN del certificato è effettivamente attiva |
+| `--generate-pin-set` | Genera un pin set SPKI (leaf + pin di backup) per il certificate pinning |
+| `--measure-0rtt` | Misura un handshake completo vs. ripreso vs. ripreso-con-0-RTT (richiede la CLI di sistema `openssl`) |
 
 ```bash
 # Scansione multi-porta con policy rigorosa
@@ -2187,15 +2212,16 @@ net-benchmark ssl check --targets ./targets.txt \
 
 #### Una nota sulle catene di certificati
 
-Il report completo della catena di fiducia (quale CA l'ha emesso, se la
-catena inviata dal server è completa, lo stato di revoca) richiede
-`SSLObject.get_unverified_chain()`, disponibile solo da **Python 3.13**. Su
-3.11/3.12 questo controllo riporta comunque tutto ciò che riguarda il
-certificato foglia presentato dal target — scadenza, robustezza della
-chiave, firma, corrispondenza dell'hostname — ma i campi relativi alla
-catena vengono riportati come non osservati, non come una stima. Il
-report sulla catena di fiducia e sulla revoca sono previsti in una
-release successiva.
+Il report completo della catena di fiducia — quale CA l'ha emesso, se la
+catena inviata dal server è completa, lo stato di revoca — è disponibile
+tramite `--verify-chain` e `--check-revocation` su ogni versione Python
+supportata. Ciò che resta legato alla versione è più circoscritto:
+osservare i **byte grezzi inviati dal peer stesso** per la propria catena
+di intermedi richiede `SSLObject.get_unverified_chain()`, disponibile solo
+da **Python 3.13**. Su 3.11/3.12, `--verify-chain` valida comunque
+correttamente — semplicemente non può usare la catena del peer come
+scorciatoia, e recupera sempre gli intermedi via AIA, il che costa qualche
+round trip in più per target ma produce lo stesso risultato validato.
 
 </details>
 
