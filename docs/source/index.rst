@@ -103,6 +103,7 @@ and via Homebrew (``brew tap net-benchmark/net-benchmark``) — see :doc:`guides
 
    reference/cli-dns
    reference/cli-http
+   reference/cli-ssl
    reference/resolvers
    reference/domains
    reference/best-practices
