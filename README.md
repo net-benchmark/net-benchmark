@@ -86,6 +86,8 @@ net-benchmark http load-test -t https://checkout.example.com/api/cart \
 ```bash
 pip install net-benchmark          # core
 pip install net-benchmark[pdf]     # with pdf export
+pip install net-benchmark[lint]    # with ssl check --lint (pkilint)
+pip install net-benchmark[crypto]  # with ssl check --deep-introspection, --simulate-clients, --jarm
 ```
 
 ### Docker
@@ -2117,11 +2119,15 @@ between renewals.
 
 net-benchmark helps you:
 
-- 🔍 **Audit the full handshake** — negotiated TLS version, cipher suite (with IANA code), ALPN, session resumption
+- 🔍 **Audit the full handshake** — negotiated TLS version, cipher suite (with IANA code), ALPN, session resumption, and (opt-in) TLS 1.3 0-RTT timing
 - 📅 **Track certificate lifetime** — days remaining, CA/Browser Forum validity-period compliance, a forward-looking check for renewals that will exceed a soon-to-tighten cap
 - 🔑 **Flag weak crypto** — under-strength keys, broken signature hashes, deprecated TLS versions
+- 🔗 **Validate the chain of trust** — AIA fetch, path validation against Mozilla/system roots (opt-in: also Apple/Google/Microsoft), OCSP/CRL revocation, cross-sign detection
+- 🕵️ **Reach past what OpenSSL exposes** — named groups (incl. post-quantum), DH parameters, TLS 1.3 cipher enumeration, signature algorithm probing, and configuration-surface vulnerability flags, via the optional `[crypto]` extra
+- 🏅 **Grade against published rubrics** — SSL Labs' own Server Rating Guide and the Server Side TLS (TLSRef, formerly Mozilla) guidelines, both scored against their actual current published documents, not an approximation
+- 🔬 **Certificate Transparency, linting, and fingerprinting** — SCT/log trust status, CA/Browser Forum Baseline Requirements linting (`[lint]` extra), JARM server fingerprinting, real-browser client simulation
 - 📬 **Check STARTTLS explicitly** — SMTP, IMAP, POP3, FTP, LDAP, with an override for non-standard ports
-- 🚦 **Gate CI on policy** — `--threshold` fails the build on an expiring certificate, a hostname mismatch, or a deprecated version, per target
+- 🚦 **Gate CI on policy** — `--threshold` fails the build on an expiring certificate, a hostname mismatch, an unexpected cipher/group, or a deprecated version, per target
 
 ##### Perfect For
 
@@ -2162,11 +2168,30 @@ Results are saved to `./benchmark_results/` — a non-zero exit code means a
 | `--check-resumption` | Test TLS session resumption with a dedicated pair of handshakes |
 | `--min-days-remaining` | Flag a certificate expiring within N days |
 | `--min-tls-version` | Flag a negotiated version below this floor, e.g. `TLSv1.2` |
-| `--expected-issuer` / `--expected-fingerprint` | Flag a certificate that doesn't match a pinned issuer or fingerprint |
+| `--expected-issuer` / `--expected-fingerprint` / `--expected-cipher` / `--expected-group` | Flag a certificate/handshake that doesn't match a pinned issuer, fingerprint, cipher, or negotiable group |
 | `--as-of` | Evaluate every certificate as of a future date, e.g. to check what breaks at a renewal deadline |
 | `--threshold` | Pass/fail criterion, e.g. `cert_expiry_days>30` (repeatable, evaluated per target, exit code 1 on any failure) |
 
 Full flag reference: `net-benchmark ssl check --help`.
+
+#### Deeper checks (opt-in — each adds network calls or a dependency)
+
+| Flag | What it does |
+|---|---|
+| `--verify-chain` | Fetch missing intermediates via AIA, validate against Mozilla + system trust |
+| `--check-multi-store` | Also validate against Apple's, Google's, and Microsoft's own root programs |
+| `--check-revocation` | Query OCSP and CRL for each certificate's own revocation status |
+| `--enumerate-protocol` | Enumerate supported TLS versions and TLS 1.2-and-below cipher suites, A–F rated |
+| `--check-ct-logs` | Resolve embedded SCTs against the CT log registry; report log trust status |
+| `--lint` | CA/Browser Forum Baseline Requirements linting via pkilint (`pip install net-benchmark[lint]`) |
+| `--deep-introspection` | Named groups (incl. post-quantum), DH parameters, extensions, signature algorithms, TLS 1.3 ciphers, vulnerability flags — via CryptoLyzer (`pip install net-benchmark[crypto]`) |
+| `--grade` | Score against the published SSL Labs Server Rating Guide |
+| `--check-mozilla-profiles` | Check compliance against the Server Side TLS (TLSRef) guidelines |
+| `--simulate-clients` | Which real browsers/libraries can complete a handshake with this target |
+| `--jarm` | Compute a JARM server fingerprint |
+| `--audit-san` | Check whether each SAN entry on the certificate is actually live |
+| `--generate-pin-set` | Generate an SPKI pin set (leaf + backup pins) for certificate pinning |
+| `--measure-0rtt` | Time a full handshake vs. resumed vs. resumed-with-0-RTT (requires the system `openssl` CLI) |
 
 ```bash
 # Multi-port scan with a strict policy
@@ -2188,13 +2213,14 @@ net-benchmark ssl check --targets ./targets.txt \
 
 #### A note on certificate chains
 
-Full chain-of-trust reporting (which CA issued it, whether the chain the
-server sent is complete, revocation status) needs `SSLObject.get_unverified_chain()`,
-which is **Python 3.13+**. On 3.11/3.12 this check still reports everything
-about the leaf certificate the target presents — expiry, key strength,
-signature, hostname match — but chain fields report as not observed rather
-than guessed. Chain-of-trust and revocation reporting are planned for a
-follow-up release.
+Full chain-of-trust reporting — which CA issued it, whether the chain the
+server sent is complete, revocation status — is available via `--verify-chain`
+and `--check-revocation` on every supported Python version. What's still
+version-gated: observing the **raw bytes the peer itself sent** for its
+intermediate chain needs `SSLObject.get_unverified_chain()`, which is
+**Python 3.13+** — on 3.11/3.12, `--verify-chain` still validates correctly,
+it just can't use the peer's own chain as a shortcut and always fetches
+intermediates via AIA instead.
 
 </details>
 
