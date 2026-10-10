@@ -1,3 +1,24 @@
+## v0.6.2 (2026-10-10)
+
+### Feat
+
+- **ssl_check**: expose compute_host_grades as public API
+- **ssl_check**: wire 0.6.2 checks into engine, CLI, and exporters
+- **ssl_check**: certificate pin set generation (0.6.2 item 25)
+- **ssl_check**: multi-SAN audit against active subdomains (0.6.2 item 27)
+- **ssl_check**: full multi-store trust validation (0.6.2 item 22)
+- **ssl_check**: JARM server fingerprinting (0.6.2 item 24)
+- **ssl_check**: Server Side TLS profile compliance (0.6.2 item 21)
+- **ssl_check**: SSL Labs-style grading (0.6.2 items 20-21)
+- **ssl_check**: TLS 1.3 0-RTT timing (0.6.2 item 11)
+- **ssl_check**: TLS deep introspection via CryptoLyzer (0.6.2 items 1-9)
+
+### Fix
+
+- **ssl_check**: pin localhost to IPv4 in tests that probe by hostname
+- **ssl_check**: parse trust-store bundles per certificate and pick the matching AIA issuer
+- **ssl_check**: cross-platform TCP_REFUSED test determinism
+
 ## v0.6.1 (2026-09-19)
 
 ### Feat
