@@ -79,6 +79,8 @@ net-benchmark http load-test -t https://checkout.example.com/api/cart \
 ```bash
 pip install net-benchmark          # 核心功能
 pip install net-benchmark[pdf]     # 包含 PDF 导出
+pip install net-benchmark[lint]    # 包含 ssl check --lint（pkilint）
+pip install net-benchmark[crypto]  # 包含 ssl check --deep-introspection、--simulate-clients、--jarm
 ```
 
 ### Docker
@@ -2075,11 +2077,15 @@ HTTP 性能受网络状况、服务器负载、CDN 路由变化和 TLS 会话恢
 
 net-benchmark 帮助你：
 
-- 🔍 **审计完整握手过程** — 协商的 TLS 版本、密码套件（含 IANA 编码）、ALPN、会话恢复
+- 🔍 **审计完整握手过程** — 协商的 TLS 版本、密码套件（含 IANA 编码）、ALPN、会话恢复，以及（可选）TLS 1.3 0-RTT 耗时测量
 - 📅 **追踪证书生命周期** — 剩余天数、CA/Browser Forum 有效期合规性，以及对"续期后是否会超出即将收紧的上限"的前瞻检查
 - 🔑 **标记弱加密配置** — 强度不足的密钥、被破解的签名哈希算法、已弃用的 TLS 版本
+- 🔗 **验证信任链** — 通过 AIA 获取证书、针对 Mozilla/系统根证书验证路径（可选：还包括 Apple/Google/Microsoft）、OCSP/CRL 吊销检查、交叉签名检测
+- 🕵️ **深入 OpenSSL 无法探测的层面** — 命名分组（含后量子）、DH 参数、TLS 1.3 密码套件枚举、签名算法探测，以及配置层面的漏洞标记，通过可选的 `[crypto]` extra 提供
+- 🏅 **依据已发布评分标准评级** — 依据 SSL Labs 自身的 Server Rating Guide 以及 Server Side TLS（TLSRef，原 Mozilla）指南评分，均对照其当前实际发布的文档评分，而非近似值
+- 🔬 **证书透明度、Lint 检查与指纹识别** — SCT/日志信任状态、CA/Browser Forum Baseline Requirements 的 Lint 检查（`[lint]` extra）、JARM 服务器指纹识别、真实浏览器客户端模拟
 - 📬 **显式检查 STARTTLS** — 支持 SMTP、IMAP、POP3、FTP、LDAP，并可为非标准端口指定协议
-- 🚦 **在 CI 中按策略设置门槛** — `--threshold` 可针对每个目标，在证书即将过期、主机名不匹配或使用弃用版本时使构建失败
+- 🚦 **在 CI 中按策略设置门槛** — `--threshold` 可针对每个目标，在证书即将过期、主机名不匹配、密码套件/分组不符合预期或使用弃用版本时使构建失败
 
 ##### 适用人群
 
@@ -2120,11 +2126,30 @@ net-benchmark ssl check \
 | `--check-resumption` | 通过一对独立握手测试 TLS 会话恢复能力 |
 | `--min-days-remaining` | 标记剩余天数低于 N 天的证书 |
 | `--min-tls-version` | 标记协商版本低于该下限的连接，例如 `TLSv1.2` |
-| `--expected-issuer` / `--expected-fingerprint` | 标记与预期颁发者或指纹不符的证书 |
+| `--expected-issuer` / `--expected-fingerprint` / `--expected-cipher` / `--expected-group` | 标记与预期颁发者、指纹、密码套件或可协商分组不符的证书/握手 |
 | `--as-of` | 以未来某个日期为基准评估所有证书，例如检查在续期截止日会出现什么问题 |
 | `--threshold` | 通过/失败条件，例如 `cert_expiry_days>30`（可重复，按目标逐一评估，任一失败则退出码为 1） |
 
 完整参数参考：`net-benchmark ssl check --help`。
+
+#### 更深入的检查（可选 — 每项都会增加网络调用或依赖项）
+
+| 参数 | 作用 |
+|---|---|
+| `--verify-chain` | 通过 AIA 获取缺失的中间证书，并针对 Mozilla + 系统信任根验证证书链 |
+| `--check-multi-store` | 同时针对 Apple、Google 和 Microsoft 各自的根证书程序进行验证 |
+| `--check-revocation` | 查询 OCSP 和 CRL 以获取每个证书自身的吊销状态 |
+| `--enumerate-protocol` | 枚举支持的 TLS 版本及 TLS 1.2 及以下密码套件，并给出 A-F 评级 |
+| `--check-ct-logs` | 将证书内嵌的 SCT 与 CT 日志注册表进行比对，报告签发日志的信任状态 |
+| `--lint` | 通过 pkilint 依据 CA/Browser Forum TLS Baseline Requirements 进行 Lint 检查（`pip install net-benchmark[lint]`） |
+| `--deep-introspection` | 命名分组（含后量子）、DH 参数、扩展、签名算法、TLS 1.3 密码套件、漏洞标记 — 通过 CryptoLyzer 提供（`pip install net-benchmark[crypto]`） |
+| `--grade` | 依据 SSL Labs 发布的 Server Rating Guide 评分 |
+| `--check-mozilla-profiles` | 检查是否符合 Server Side TLS（TLSRef）指南 |
+| `--simulate-clients` | 哪些真实浏览器/客户端库能与该目标成功完成握手 |
+| `--jarm` | 计算 JARM 服务器指纹 |
+| `--audit-san` | 检查证书的每个 SAN 条目是否实际处于活跃状态 |
+| `--generate-pin-set` | 生成用于证书锁定的 SPKI pin set（叶证书 + 来自证书链的备用 pin） |
+| `--measure-0rtt` | 测量完整握手、会话恢复握手与带 0-RTT 的会话恢复握手三者的耗时（需要系统 `openssl` 命令行工具） |
 
 ```bash
 # 多端口扫描并设置严格策略
@@ -2146,11 +2171,14 @@ net-benchmark ssl check --targets ./targets.txt \
 
 #### 关于证书链的说明
 
-完整的信任链报告（由哪个 CA 签发、服务器发送的证书链是否完整、吊销状态）
-需要 `SSLObject.get_unverified_chain()`，该方法要求 **Python 3.13 及以上**。
-在 3.11/3.12 上，此检查仍会报告目标叶证书的全部信息——过期时间、密钥强度、
-签名、主机名匹配——但证书链字段会标记为"未观测到"，而不是猜测结果。
-信任链与吊销状态报告计划在后续版本中提供。
+完整的信任链报告——由哪个 CA 签发、服务器发送的证书链是否完整、吊销状态——
+现已可通过 `--verify-chain` 与 `--check-revocation` 在所有支持的 Python
+版本上使用。仍与版本相关的范围要窄得多：获取**对端自身发送的原始字节**
+以观测其自身的中间证书链，需要 `SSLObject.get_unverified_chain()`，该方法
+要求 **Python 3.13 及以上**。在 3.11/3.12 上，`--verify-chain` 仍能正确
+完成验证——只是无法将对端自身发送的证书链作为捷径，而是始终通过 AIA
+获取中间证书，这会为每个目标多花费几次往返请求，但会得到同样经过验证
+的结果。
 
 </details>
 
