@@ -153,6 +153,10 @@ full documentation: [http load testing](https://net-benchmark.readthedocs.io/en/
 # certificate expiry, weak keys/signatures, deprecated TLS, all flagged by default
 net-benchmark ssl check --targets "example.com,api.example.com"
 
+# chain of trust, revocation, protocol/cipher enumeration, CT transparency, grading
+net-benchmark ssl check --targets example.com \
+  --verify-chain --check-revocation --enumerate-protocol --grade
+
 # CI gate: fail the build on an expiring certificate
 net-benchmark ssl check --targets ./targets.txt --threshold 'cert_expiry_days>30'
 
@@ -160,9 +164,12 @@ net-benchmark ssl check --targets ./targets.txt --threshold 'cert_expiry_days>30
 net-benchmark ssl check --targets mail.example.com:2525 --starttls smtp
 ```
 
-Chain-of-trust and revocation reporting need Python 3.13+
-(`SSLObject.get_unverified_chain()`); on 3.11/3.12 the leaf certificate is
-still fully checked. Full documentation: [SSL Check guide](https://net-benchmark.readthedocs.io/en/latest/guides/ssl-check.html)
+Opt-in checks add: chain-of-trust validation and OCSP/CRL revocation,
+protocol/cipher enumeration, Certificate Transparency, CA/Browser Forum
+linting (`pip install net-benchmark[lint]`), deep handshake introspection
+including post-quantum groups (`pip install net-benchmark[crypto]`),
+grading against the published SSL Labs and Server Side TLS rubrics, JARM
+fingerprinting, and more. Full documentation: [SSL Check guide](https://net-benchmark.readthedocs.io/en/latest/guides/ssl-check.html)
 
 </details>
 
