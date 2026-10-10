@@ -13,7 +13,14 @@
 ```bash
 pip install net-benchmark          # core
 pip install net-benchmark[pdf]     # with PDF export
+pip install net-benchmark[lint]    # with ssl check --lint (pkilint)
+pip install net-benchmark[crypto]  # with ssl check --deep-introspection, --simulate-clients, --jarm
 ```
+
+Extras are independent and combinable: `pip install net-benchmark[pdf,lint,crypto]`
+installs all three. A check that needs a missing extra reports its own
+availability plainly in the result rather than raising — the rest of the
+scan still runs.
 
 ---
 
