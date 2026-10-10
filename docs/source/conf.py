@@ -47,8 +47,8 @@ def setup(app: Sphinx) -> None:
 project = "net-benchmark"
 copyright = f"{_YEAR_RANGE}, Joseph Oseh Frank and net-benchmark contributors"
 author = "Joseph Oseh Frank"
-release = "0.5.0"
-version = "0.5"
+release = "0.6.0"
+version = "0.6"
 
 extensions = [
     "sphinx.ext.autodoc",
