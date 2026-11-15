@@ -1147,7 +1147,7 @@ class ResolverManager:
             "name": "AdGuard Family",
             "provider": "AdGuard",
             "ip": "94.140.14.15",
-            "ipv6": "2a10:50c0::ad2:ff",
+            "ipv6": "2a10:50c0::bad1:ff",
             "type": "public",
             "category": "family",
             "features": ["Ad Blocking", "Adult Content Blocking", "Safe Search"],
